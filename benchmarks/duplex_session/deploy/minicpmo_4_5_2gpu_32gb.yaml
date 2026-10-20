@@ -1,0 +1,28 @@
+# MiniCPM-o 4.5 two-GPU duplex deploy for 2x 32 GB GPUs (RTX 5090).
+# Used by benchmarks/duplex_session/serve.sh LAYOUT=2gpu.
+#
+# Design doc: docs/design/fullduplex.md (Serving); recipe:
+# recipes/OpenBMB/MiniCPM-o-4_5.md. Inherits the shipped two-GPU profile
+# (Thinker GPU 0; Talker + Code2Wav GPU 1). Edge target: <= 4 sessions.
+base_config: ../../../vllm_omni/deploy/minicpmo_4_5_2gpu.yaml
+
+stages:
+  - stage_id: 0
+    # HF default is 40960, leaves too little KV-cache space with the vision tower
+    # and 32-frame video profiling.
+    max_model_len: 16384
+    # Replaces the base mapping
+    # image > 0 is required to build the SigLIP vision tower
+    # this caps at 1 image per chat request, but chat requests are not the focus
+    # video options bounded the startup profiling to one 32-frame video per prompt
+    # runtime decoding limits can be set by media_io_kwargs if necessary
+    limit_mm_per_prompt:
+      image: 1
+      video:
+        count: 1
+        num_frames: 32
+      audio: 64
+    hf_overrides:
+      # Edge target: <= 4 concurrent sessions. Capture batch sizes 1, 2, 4
+      # instead of 1..32 (3.59 -> 0.76 GiB measured on stage 0).
+      duplex_audio_encoder_cuda_graph_batch_sizes_from_sessions: true
