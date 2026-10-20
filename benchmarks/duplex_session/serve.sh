@@ -8,7 +8,7 @@
 # nsys (PROFILE=cuda only).
 #
 # Environment:
-#   LAYOUT          2gpu (default; the only supported layout)
+#   LAYOUT          1gpu | 2gpu (default 2gpu)
 #   PROFILE         off | torch | cuda (default off)
 #   PROFILE_STAGES  comma-separated stage ids given profiler_config (default 0)
 #   PROFILE_DIR     output root for traces (default /tmp/duplex_session_profile)
@@ -27,8 +27,9 @@ PORT=${PORT:-8099}
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 
 case "$LAYOUT" in
+  1gpu) DEPLOY="$REPO_ROOT/benchmarks/duplex_session/deploy/minicpmo_4_5_1gpu_32gb.yaml" ;;
   2gpu) DEPLOY="$REPO_ROOT/benchmarks/duplex_session/deploy/minicpmo_4_5_2gpu_32gb.yaml" ;;
-  *) echo "LAYOUT must be 2gpu, got '$LAYOUT'" >&2; exit 2 ;;
+  *) echo "LAYOUT must be 1gpu or 2gpu, got '$LAYOUT'" >&2; exit 2 ;;
 esac
 
 if ! [[ "$PROFILE_STAGES" =~ ^[0-2](,[0-2])*$ ]]; then

@@ -14,9 +14,10 @@ directory.
 | `LAYOUT` | Deploy config | Placement | Sessions |
 | --- | --- | --- | --- |
 | `2gpu` (default) | [`deploy/minicpmo_4_5_2gpu_32gb.yaml`](deploy/minicpmo_4_5_2gpu_32gb.yaml) | Thinker GPU 0; Talker + Code2Wav GPU 1 | 4 |
+| `1gpu` | [`deploy/minicpmo_4_5_1gpu_32gb.yaml`](deploy/minicpmo_4_5_1gpu_32gb.yaml) | all stages GPU 0 | 2 |
 
-The overlay inherits the shipped two-GPU profile and adapts it to 32 GB cards
-and the edge target of at most 4 concurrent sessions:
+The `2gpu` overlay inherits the shipped two-GPU profile and adapts it to 32 GB
+cards and the edge target of at most 4 concurrent sessions:
 
 - **Session-sized audio encoder graphs.** Stage 0 captures batch sizes 1, 2 and 4
   instead of 1 to 32 (0.76 GiB instead of 3.59 GiB).
@@ -31,6 +32,19 @@ and the edge target of at most 4 concurrent sessions:
   `vllm_omni/core/sched/omni_ar_scheduler.py`). Long multi-turn runs need a
   session window or fewer turns.
 
+The `1gpu` overlay fits all three stages into one 32 GB card. Unlike `2gpu`:
+
+- **Audio only** (`image: 0`, so no vision tower), and **the Thinker is capped
+  at `max_model_len: 8192`** with a fixed 1.25 GiB KV pool (9070 tokens, shared
+  by all sessions).
+- **At most 2 concurrent sessions.** Session-sized buffers follow: Stage-0 audio
+  encoder graphs for batch sizes 1 and 2, a 2-row Code2Wav CFM arena
+  (`micro_batch_size: 2`) and a 0.5 GiB Talker KV pool.
+- Prefill batches are 4096 tokens on Stages 0 and 1.
+
+Compare the two layouts only on audio-only workloads that stay below 8192
+tokens per session, at no more than 2 concurrent sessions.
+
 Stage 2 requires `step-audio2==1.0.0` (the `dev` extra in `pyproject.toml`;
 `uv pip install step-audio2==1.0.0`). Do not install `stepaudio2-minicpmo` as
 the recipe says: its `stepaudio2` package conflicts and lacks `cosyvoice2`, so
@@ -38,7 +52,10 @@ start-up fails with `ImportError: There is no such class as cosyvoice2...`.
 
 **Status (2026-10-20):** `2gpu` boots and serves audio and audio + video
 duplex turns (warm first audio 156 ms audio-only, 177–198 ms with five 1 fps
-frames), and torch profiling of stages 0 and 1 works.
+frames), and torch profiling of stages 0 and 1 works. `1gpu` served one
+warm-up and six rounds of 2 concurrent audio sessions (one turn each). Only
+230 MiB of the card stayed free, so watch for Code2Wav or Thinker out-of-memory
+errors on longer multi-turn runs.
 
 The first session after start-up is slow: its first audio took 2–28 s across
 boots, against ~160 ms when warm. Always run warm-up sessions before measuring

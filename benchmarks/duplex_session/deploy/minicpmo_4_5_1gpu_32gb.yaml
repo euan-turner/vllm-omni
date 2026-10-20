@@ -1,0 +1,60 @@
+# MiniCPM-o 4.5 three-stage duplex deploy re-budgeted for one 32 GB GPU
+# (RTX 5090), audio-only. Used by benchmarks/duplex_session/serve.sh LAYOUT=1gpu.
+#
+# Design doc: docs/design/fullduplex.md (Serving); recipe:
+# recipes/OpenBMB/MiniCPM-o-4_5.md. Inherits the shipped single-GPU profile
+# and overrides only capacity, memory and modality limits.
+#
+# Edge target on this layout: <= 2 concurrent sessions. Measured 2026-10-20
+# with 4-session buffers: 3 sessions left 116 MiB free; 4 ran Code2Wav out of memory.
+base_config: ../../../vllm_omni/deploy/minicpmo_4_5.yaml
+
+duplex_session:
+  # Matches max_num_seqs on every stage below.
+  max_sessions: 2
+
+connectors:
+  connector_of_shared_memory:
+    extra:
+      # Whole-Euler CFM arena rows sized for max_sessions: 2 rows take
+      # 1.25 GiB instead of the base 4-row 2.5 GiB.
+      micro_batch_size: 2
+
+stages:
+  - stage_id: 0
+    max_num_seqs: 2
+    gpu_memory_utilization: 0.68
+    # Workload change versus the shipped profile (HF default 40960). vLLM
+    # requires the KV pool to hold one full-length request; at ~145 KiB/token
+    # 8192 tokens need ~1.2 GiB. Caps the per-session context for multi-turn runs.
+    max_model_len: 8192
+    # Reduction from 16384 reduces peak activation 2.56 -> 0.64 GiB; long prefills are chunked.
+    max_num_batched_tokens: 4096
+    # Audio-only: image 0 skips building the SigLIP tower, so duplex
+    # video_frames are not encodable. Replaces the base mapping.
+    limit_mm_per_prompt:
+      image: 0
+      video: 0
+      audio: 64
+    hf_overrides:
+      # Capture batch sizes 1 and 2 (from max_sessions) instead of 1..32.
+      duplex_audio_encoder_cuda_graph_batch_sizes_from_sessions: true
+  - stage_id: 1
+    max_num_seqs: 2
+    gpu_memory_utilization: 0.10
+    max_num_batched_tokens: 4096
+  - stage_id: 2
+    max_num_seqs: 2
+    gpu_memory_utilization: 0.15
+
+platforms:
+  cuda:
+    stages:
+      - stage_id: 0
+        # Fixed budget: device-level profiling overshoots gpu_memory_utilization
+        # by 0.7-1.4 GiB here. 1.25 GiB holds 9070 tokens, one full 8192 request.
+        kv_cache_memory_bytes: 1342177280  # 1.25 GiB
+      - stage_id: 1
+        # Full-attention bound is max_num_seqs * max_model_len = 2 * 4096
+        # tokens; 0.5 GiB holds ~8736 (17472 measured at 1 GiB).
+        kv_cache_memory_bytes: 536870912  # 0.5 GiB

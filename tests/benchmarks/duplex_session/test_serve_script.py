@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for benchmarks/duplex_session/serve.sh and its 2-GPU deploy overlay.
+"""Tests for benchmarks/duplex_session/serve.sh and its 1-GPU and 2-GPU deploy overlays.
 
 Design doc: docs/design/fullduplex.md (Serving).
 External dependencies: bash; the overlay test needs vllm (skipped otherwise).
@@ -49,6 +49,13 @@ def test_default_layout_selects_2gpu_overlay() -> None:
     assert deploy.is_file()
 
 
+def test_1gpu_layout_selects_1gpu_overlay() -> None:
+    argv = _argv(LAYOUT="1gpu")
+    deploy = REPO_ROOT / "benchmarks/duplex_session/deploy/minicpmo_4_5_1gpu_32gb.yaml"
+    assert _flag(argv, "--deploy-config") == str(deploy)
+    assert deploy.is_file()
+
+
 def test_profile_off_adds_no_overrides_or_nsys() -> None:
     argv = _argv(PROFILE="off", PROFILE_STAGES="0,1")
     assert "--stage-overrides" not in argv
@@ -87,7 +94,6 @@ def test_extra_arguments_pass_through_to_serve() -> None:
 @pytest.mark.parametrize(
     "env",
     [
-        {"LAYOUT": "1gpu"},
         {"LAYOUT": "3gpu"},
         {"PROFILE": "nsys"},
         {"PROFILE": "torch", "PROFILE_STAGES": "0,3"},
@@ -131,3 +137,30 @@ def test_2gpu_overlay_builds_vision_tower_with_bounded_video_profiling() -> None
     limits = stages[0]["limit_mm_per_prompt"]
     assert limits["image"] >= 1
     assert limits["video"] == {"count": 1, "num_frames": 32}
+
+
+def test_1gpu_overlay_caps_two_sessions_on_one_device() -> None:
+    merged, stages = _resolved_stages("minicpmo_4_5_1gpu_32gb.yaml")
+
+    assert merged["session_mode"] == "duplex"
+    assert {stage["devices"] for stage in stages.values()} == {"0"}
+    assert {stage["max_num_seqs"] for stage in stages.values()} == {merged["duplex_session"]["max_sessions"]} == {2}
+    assert stages[0]["hf_overrides"] == {"duplex_audio_encoder_cuda_graph_batch_sizes_from_sessions": True}
+    extra = merged["connectors"]["connector_of_shared_memory"]["extra"]
+    assert extra["micro_batch_size"] == merged["duplex_session"]["max_sessions"]
+    assert extra["codec_chunk_frames"] == 25
+
+
+def test_1gpu_overlay_is_audio_only_with_8192_context() -> None:
+    _, stages = _resolved_stages("minicpmo_4_5_1gpu_32gb.yaml")
+
+    assert stages[0]["max_model_len"] == 8192
+    assert stages[0]["max_num_batched_tokens"] == 4096
+    assert stages[0]["limit_mm_per_prompt"] == {"image": 0, "video": 0, "audio": 64}
+
+
+def test_1gpu_overlay_fixed_kv_pools() -> None:
+    merged, stages = _resolved_stages("minicpmo_4_5_1gpu_32gb.yaml")
+
+    cuda_kv = {s["stage_id"]: s["kv_cache_memory_bytes"] for s in merged["platforms"]["cuda"]["stages"]}
+    assert cuda_kv == {0: 1342177280, 1: 536870912}
