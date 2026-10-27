@@ -71,6 +71,15 @@ def test_torch_profile_configures_exactly_the_listed_stages() -> None:
         assert stage["profiler_config"]["torch_profiler_dir"] == "/tmp/p/torch"
 
 
+@pytest.mark.parametrize(("with_stack", "expected"), [(None, False), ("0", False), ("1", True)])
+def test_torch_profile_stacks_are_opt_in_and_cuda_time_dump_is_off(with_stack: str | None, expected: bool) -> None:
+    env = {"PROFILE": "torch"} | ({"TORCH_WITH_STACK": with_stack} if with_stack is not None else {})
+    config = json.loads(_flag(_argv(**env), "--stage-overrides"))["0"]["profiler_config"]
+    assert config["torch_profiler_with_stack"] is expected
+    assert config["torch_profiler_dump_cuda_time_total"] is False
+    assert config["torch_profiler_use_gzip"] is True
+
+
 def test_cuda_profile_wraps_server_in_nsys_capture_range() -> None:
     argv = _argv(PROFILE="cuda", PROFILE_STAGES="1")
     assert argv[:2] == ["nsys", "profile"]
@@ -98,6 +107,7 @@ def test_extra_arguments_pass_through_to_serve() -> None:
         {"PROFILE": "nsys"},
         {"PROFILE": "torch", "PROFILE_STAGES": "0,3"},
         {"PROFILE": "torch", "PROFILE_STAGES": "0,,1"},
+        {"PROFILE": "torch", "TORCH_WITH_STACK": "yes"},
     ],
 )
 def test_invalid_settings_exit_before_launch(env: dict[str, str]) -> None:

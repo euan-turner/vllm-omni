@@ -4,8 +4,6 @@ Research harness for latency and profiling experiments on MiniCPM-o 4.5 in
 full-duplex mode. Design record: [`docs/design/fullduplex.md`](../../docs/design/fullduplex.md);
 model recipe: [`recipes/OpenBMB/MiniCPM-o-4_5.md`](../../recipes/OpenBMB/MiniCPM-o-4_5.md).
 
-`metrics.py` in this directory defines what "faster" means and is human-owned.
-
 ## Serving
 
 [`serve.sh`](serve.sh) launches `vllm-omni serve` in duplex mode. Run it from any
@@ -96,3 +94,60 @@ curl -sS -X POST localhost:8099/stop_profile -H 'Content-Type: application/json'
   stage without `profiler_config` makes `/start_profile` return HTTP 500.
 - Profiled latency is diagnostic only. Take performance numbers from a
   `PROFILE=off` server.
+
+## Profiling concurrent sessions
+
+[`profile_run.sh`](profile_run.sh) drives a running `serve.sh` server with
+`vllm bench omni-duplex-eval generate`. Each sample is one full-duplex session
+with one question (audio + 1 fps video by default). The script runs `WARMUP`
+serial warm-up sessions, then calls `/start_profile`, runs `LIMIT` sessions at
+`CONCURRENCY`, and calls `/stop_profile`. Between warm-up and profiling it resets the prefix,
+multimodal and encoder caches, so samples repeated from warm-up are not cheaper;
+these are vLLM dev endpoints, which `serve.sh` enables with
+`VLLM_SERVER_DEV_MODE=1`. It moves the new torch traces into the
+run directory and writes a `trace_analyzer.py` summary next to each one: GPU
+busy and idle time for that stage process, the longest idle gaps with the CPU
+work overlapping them, and the kernels with the most total time. Finally it
+merges the stage traces into `merged_trace.json.gz` in the run directory, one
+Perfetto timeline with a CPU and a GPU row per stage, and warns when a stage
+in `run.json` has no trace. To merge earlier runs:
+`python benchmarks/duplex_session/merge_stage_traces.py /tmp/duplex_session_runs/*/`.
+
+The full Omni-DuplexEval dataset is about 18 GB, so mirror one split locally.
+RTD_Omni has 50 samples, 669 MB, with videos of 25 s median and 53 s max:
+
+```bash
+hf download Hothan/Omni-DuplexEval data/RTD_Omni-00000-of-00001.parquet \
+    --repo-type dataset --local-dir "$HF_HOME/omni_duplex_eval"
+```
+
+`load_samples` needs `datasets` (`uv pip install --python .venv/bin/python datasets==3.6.0`).
+
+```bash
+LAYOUT=2gpu PROFILE=torch PROFILE_STAGES=0,1,2 benchmarks/duplex_session/serve.sh
+
+DATASET="$HF_HOME/omni_duplex_eval" SPLIT=RTD_Omni STAGES=0,1,2 CONCURRENCY=2 \
+    REF_AUDIO=/path/to/MiniCPM-o-4_5/assets/HT_ref_audio.wav \
+    benchmarks/duplex_session/profile_run.sh
+```
+
+- Output goes to `$OUT_ROOT/<timestamp>_c<CONCURRENCY>_n<LIMIT>/`: `run.json`
+  (git sha and settings), `warmup/` and `measured/` responses with
+  `duplex_metrics.json`, `traces/` and `merged_trace.json.gz`.
+- Warm-up and measured runs both start from the first sample, so they overlap;
+  the cache resets in between keep the overlap from making measured sessions
+  cheaper.
+- `PROFILE_DIR` must match the server's. With `PROFILE=cuda` the nsys report is
+  written only when the server shuts down, so the script finds no torch traces.
+- **2gpu only for now.** omni-duplex-eval always sends video (`--fps 0` divides
+  by zero), and the `1gpu` overlay is audio-only.
+- Traces of several 25 s sessions are large (stage 0: 29 MB gzipped for four
+  sessions), so start with a small `LIMIT`.
+- `/stop_profile` is slow. Stages stop one after another, and each builds a
+  `key_averages` op table. With stacks and the CUDA-time dump on, one session
+  on stages 0 and 1 took 11 min; with `serve.sh`'s defaults (both off), four
+  sessions on stages 0 to 2 took 80 s (2026-10-22). `TORCH_WITH_STACK=1`
+  brings the slow path back.
+- Stages keep writing after `/stop_profile` returns, so the script waits until
+  the new files stop changing (`TRACE_SETTLE_POLL_S`, default 10 s;
+  `TRACE_SETTLE_TIMEOUT_S`, default 300 s; observed about 25 s).

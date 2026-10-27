@@ -12,7 +12,11 @@
 #   PROFILE         off | torch | cuda (default off)
 #   PROFILE_STAGES  comma-separated stage ids given profiler_config (default 0)
 #   PROFILE_DIR     output root for traces (default /tmp/duplex_session_profile)
+#   TORCH_WITH_STACK  1 records Python stacks in torch traces (default 0; slows
+#                   /stop_profile and enlarges traces)
 #   MODEL, PORT     default openbmb/MiniCPM-o-4_5, 8099
+#   VLLM_SERVER_DEV_MODE  default 1, exposes the cache-reset endpoints that
+#                   profile_run.sh calls; local research servers only
 #   DRY_RUN=1       print the command instead of running it
 # Extra arguments are passed through to `vllm-omni serve`.
 set -euo pipefail
@@ -21,8 +25,10 @@ LAYOUT=${LAYOUT:-2gpu}
 PROFILE=${PROFILE:-off}
 PROFILE_STAGES=${PROFILE_STAGES:-0}
 PROFILE_DIR=${PROFILE_DIR:-/tmp/duplex_session_profile}
+TORCH_WITH_STACK=${TORCH_WITH_STACK:-0}
 MODEL=${MODEL:-openbmb/MiniCPM-o-4_5}
 PORT=${PORT:-8099}
+export VLLM_SERVER_DEV_MODE=${VLLM_SERVER_DEV_MODE:-1}
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 
@@ -37,12 +43,18 @@ if ! [[ "$PROFILE_STAGES" =~ ^[0-2](,[0-2])*$ ]]; then
   exit 2
 fi
 
+case "$TORCH_WITH_STACK" in
+  0) WITH_STACK=false ;;
+  1) WITH_STACK=true ;;
+  *) echo "TORCH_WITH_STACK must be 0 or 1, got '$TORCH_WITH_STACK'" >&2; exit 2 ;;
+esac
+
 case "$PROFILE" in
   off) PROFILER_CONFIG="" ;;
   torch)
     PROFILER_CONFIG="{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$PROFILE_DIR/torch\",\
-\"torch_profiler_with_stack\":true,\"torch_profiler_record_shapes\":false,\
-\"torch_profiler_use_gzip\":true,\"torch_profiler_dump_cuda_time_total\":true}"
+\"torch_profiler_with_stack\":$WITH_STACK,\"torch_profiler_record_shapes\":false,\
+\"torch_profiler_use_gzip\":true,\"torch_profiler_dump_cuda_time_total\":false}"
     ;;
   cuda) PROFILER_CONFIG='{"profiler":"cuda"}' ;;
   *) echo "PROFILE must be off, torch or cuda, got '$PROFILE'" >&2; exit 2 ;;
