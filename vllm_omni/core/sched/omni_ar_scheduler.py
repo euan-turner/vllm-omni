@@ -23,6 +23,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
+from vllm_omni.core.sched.duplex_tick_trace import DuplexTickTracer
 from vllm_omni.core.sched.fast_allocate import install_decode_allocate_fast_path
 from vllm_omni.core.sched.omni_scheduler_mixin import OmniSchedulerMixin
 from vllm_omni.core.sched.utils import (
@@ -191,11 +192,15 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
         # External finishes release Request before their terminal output is assembled.
         self._held_token_ids: dict[str, list[int]] = {}
         self._init_prefill_admission_policy()
+        self._tick_tracer = DuplexTickTracer(getattr(self.vllm_config.model_config, "stage_id", 0))
 
     def add_request(self, request: Request) -> None:
         if request.request_id in getattr(self, "_overflowed_streaming_requests", ()):
             logger.debug("[Omni] Dropping append for overflowed request %s pending ordered abort", request.request_id)
             return
+        tracer = getattr(self, "_tick_tracer", None)
+        if tracer is not None and tracer.enabled:
+            tracer.on_add_request(request, self.requests.get(request.request_id))
         super().add_request(request)
 
     def release_overflowed_requests(self, request_ids: Iterable[str]) -> None:
@@ -786,6 +791,9 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
         # booking paths the rewrite already ran ahead of the booking and this
         # call finds uniform spans and returns.
         self._enforce_kstep_span_uniformity(scheduler_output)
+        tracer = getattr(self, "_tick_tracer", None)
+        if tracer is not None and tracer.enabled:
+            tracer.on_schedule(scheduler_output.num_scheduled_tokens)
         self._postprocess_omni_schedule_output(
             scheduler_output,
             include_cached_payloads=True,
@@ -818,6 +826,9 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
         kv_connector_output = model_runner_output.kv_connector_output
         ec_connector_output = getattr(model_runner_output, "ec_connector_output", None)
         cudagraph_stats: CUDAGraphStat | None = model_runner_output.cudagraph_stats
+        tracer = getattr(self, "_tick_tracer", None)
+        if tracer is not None and tracer.enabled:
+            tracer.on_step_output(num_scheduled_tokens)
 
         # Every GPU write enqueued by this and earlier steps has completed, so
         # it is safe to return deferred-free blocks to the pool. This is the
@@ -1226,6 +1237,8 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status to WAITING for streaming requests that continue.
                 finish_reason = request.get_finished_reason()
+                if tracer is not None and tracer.enabled:
+                    tracer.on_segment_stop(request)
                 if self.chunk_transfer_adapter is not None:
                     try:
                         boundary_generation = int(getattr(request, "_omni_segment_generation", 0) or 0)
@@ -1486,6 +1499,9 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
         stage 0.
         """
         req_id = session.request_id
+        tracer = getattr(self, "_tick_tracer", None)
+        if tracer is not None and tracer.enabled:
+            tracer.on_apply_update(session, len(update.prompt_token_ids or ()))
         self._new_prompt_len_snapshot[req_id] = len(update.prompt_token_ids)
         outstanding_async_tokens = getattr(session, "num_output_placeholders", 0)
         # Use the same confirmed span that upstream preserves when extending
@@ -1950,6 +1966,9 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
         if overflowed is None:
             overflowed = self._overflowed_streaming_requests = set()
         overflowed.add(session.request_id)
+        tracer = getattr(self, "_tick_tracer", None)
+        if tracer is not None and tracer.enabled:
+            tracer.on_overflow(session.request_id)
         if session.is_finished():
             # Reached from ``_handle_stopped_request`` with a queued update.
             # ``update_from_output`` frees every request that call reports as

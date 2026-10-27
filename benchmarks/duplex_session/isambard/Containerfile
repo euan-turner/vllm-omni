@@ -1,0 +1,18 @@
+# vLLM-Omni image for Isambard-AI (GH200, linux/arm64), long-context duplex profiling.
+# Prototype (branch long-context-prototype). Build from the repo root:
+#   podman-hpc build -f benchmarks/duplex_session/isambard/Containerfile -t vllm-omni-lc .
+# Run check_arm64.sh first: it is not yet verified that BASE_IMAGE has an
+# arm64 variant or that step-audio2's dependencies have aarch64 wheels.
+ARG BASE_IMAGE=docker.io/vllm/vllm-openai:v0.32.0
+FROM ${BASE_IMAGE}
+
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends git jq curl ffmpeg && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+COPY . /app/vllm-omni
+RUN PY="$(python3 -c 'import sys; print(sys.executable)')" && \
+    uv pip install --python "$PY" --no-cache-dir "/app/vllm-omni" && \
+    uv pip install --python "$PY" --no-cache-dir step-audio2==1.0.0 datasets==3.6.0 av matplotlib websockets
+RUN ln -sf /usr/bin/python3 /usr/bin/python
+ENTRYPOINT []

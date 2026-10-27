@@ -174,3 +174,37 @@ def test_1gpu_overlay_fixed_kv_pools() -> None:
 
     cuda_kv = {s["stage_id"]: s["kv_cache_memory_bytes"] for s in merged["platforms"]["cuda"]["stages"]}
     assert cuda_kv == {0: 1342177280, 1: 536870912}
+
+
+def _dry_run_env(**env: str) -> str:
+    result = _dry_run(**env)
+    assert result.returncode == 0, result.stderr
+    return result.stderr
+
+
+def test_gh200_layout_overflows_hf_context_explicitly() -> None:
+    env = {"LAYOUT": "gh200", "TICK_TRACE_DIR": "/tmp/ticks"}
+    argv = _argv(**env)
+    deploy = DEPLOY_DIR / "minicpmo_4_5_gh200_long_context.yaml"
+    assert _flag(argv, "--deploy-config") == str(deploy)
+    assert deploy.is_file()
+    assert json.loads(_flag(argv, "--stage-overrides")) == {"0": {"max_model_len": 131072}}
+    stderr = _dry_run_env(**env)
+    assert "VLLM_ALLOW_LONG_MAX_MODEL_LEN=1" in stderr
+    assert "VLLM_OMNI_DUPLEX_TICK_TRACE_DIR=/tmp/ticks" in stderr
+
+
+def test_max_model_len_within_hf_limit_merges_with_profiler_overrides() -> None:
+    env = {"LAYOUT": "gh200", "MAX_MODEL_LEN": "40960", "PROFILE": "torch", "PROFILE_STAGES": "0,1"}
+    overrides = json.loads(_flag(_argv(**env), "--stage-overrides"))
+    assert overrides["0"]["max_model_len"] == 40960
+    assert "profiler_config" in overrides["0"] and "profiler_config" in overrides["1"]
+    assert "max_model_len" not in overrides["1"]
+    assert "VLLM_ALLOW_LONG_MAX_MODEL_LEN=1" not in _dry_run_env(**env)
+
+
+@pytest.mark.parametrize("value", ["0", "abc", "-5"])
+def test_invalid_max_model_len_is_rejected(value: str) -> None:
+    result = _dry_run(LAYOUT="gh200", MAX_MODEL_LEN=value)
+    assert result.returncode == 2
+    assert "MAX_MODEL_LEN" in result.stderr

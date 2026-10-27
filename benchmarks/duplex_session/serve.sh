@@ -8,7 +8,10 @@
 # nsys (PROFILE=cuda only).
 #
 # Environment:
-#   LAYOUT          1gpu | 2gpu (default 2gpu)
+#   LAYOUT          1gpu | 2gpu | gh200 (default 2gpu)
+#   MAX_MODEL_LEN   Stage-0 max_model_len override (gh200 default 131072). Above
+#                   the HF limit (40960) it exports VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+#   TICK_TRACE_DIR  writes Stage-0 per-tick JSONL records there (default off)
 #   PROFILE         off | torch | cuda (default off)
 #   PROFILE_STAGES  comma-separated stage ids given profiler_config (default 0)
 #   PROFILE_DIR     output root for traces (default /tmp/duplex_session_profile)
@@ -31,12 +34,32 @@ PORT=${PORT:-8099}
 export VLLM_SERVER_DEV_MODE=${VLLM_SERVER_DEV_MODE:-1}
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+HF_MAX_MODEL_LEN=40960
 
 case "$LAYOUT" in
   1gpu) DEPLOY="$REPO_ROOT/benchmarks/duplex_session/deploy/minicpmo_4_5_1gpu_32gb.yaml" ;;
   2gpu) DEPLOY="$REPO_ROOT/benchmarks/duplex_session/deploy/minicpmo_4_5_2gpu_32gb.yaml" ;;
-  *) echo "LAYOUT must be 1gpu or 2gpu, got '$LAYOUT'" >&2; exit 2 ;;
+  gh200)
+    DEPLOY="$REPO_ROOT/benchmarks/duplex_session/deploy/minicpmo_4_5_gh200_long_context.yaml"
+    MAX_MODEL_LEN=${MAX_MODEL_LEN:-131072}
+    ;;
+  *) echo "LAYOUT must be 1gpu, 2gpu or gh200, got '$LAYOUT'" >&2; exit 2 ;;
 esac
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-}
+
+if [[ -n "$MAX_MODEL_LEN" ]]; then
+  if ! [[ "$MAX_MODEL_LEN" =~ ^[1-9][0-9]*$ ]]; then
+    echo "MAX_MODEL_LEN must be a positive integer, got '$MAX_MODEL_LEN'" >&2
+    exit 2
+  fi
+  if (( MAX_MODEL_LEN > HF_MAX_MODEL_LEN )); then
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+  fi
+fi
+
+if [[ -n "${TICK_TRACE_DIR:-}" ]]; then
+  export VLLM_OMNI_DUPLEX_TICK_TRACE_DIR="$TICK_TRACE_DIR"
+fi
 
 if ! [[ "$PROFILE_STAGES" =~ ^[0-2](,[0-2])*$ ]]; then
   echo "PROFILE_STAGES must be comma-separated ids in 0..2, got '$PROFILE_STAGES'" >&2
@@ -67,11 +90,20 @@ CMD=(vllm-omni serve "$MODEL" --omni
   --chat-template-content-format openai
   --host 0.0.0.0 --port "$PORT")
 
+declare -A STAGE_FIELDS=()
 if [[ -n "$PROFILER_CONFIG" ]]; then
-  OVERRIDES=""
   IFS=',' read -ra STAGE_IDS <<< "$PROFILE_STAGES"
   for stage_id in "${STAGE_IDS[@]}"; do
-    OVERRIDES+="${OVERRIDES:+,}\"$stage_id\":{\"profiler_config\":$PROFILER_CONFIG}"
+    STAGE_FIELDS[$stage_id]="\"profiler_config\":$PROFILER_CONFIG"
+  done
+fi
+if [[ -n "$MAX_MODEL_LEN" ]]; then
+  STAGE_FIELDS[0]="${STAGE_FIELDS[0]:+${STAGE_FIELDS[0]},}\"max_model_len\":$MAX_MODEL_LEN"
+fi
+if (( ${#STAGE_FIELDS[@]} > 0 )); then
+  OVERRIDES=""
+  for stage_id in $(printf '%s\n' "${!STAGE_FIELDS[@]}" | sort -n); do
+    OVERRIDES+="${OVERRIDES:+,}\"$stage_id\":{${STAGE_FIELDS[$stage_id]}}"
   done
   CMD+=(--stage-overrides "{$OVERRIDES}")
 fi
@@ -88,6 +120,7 @@ if [[ "$PROFILE" == cuda ]]; then
 fi
 
 if [[ "${DRY_RUN:-0}" == 1 ]]; then
+  echo "env: VLLM_ALLOW_LONG_MAX_MODEL_LEN=${VLLM_ALLOW_LONG_MAX_MODEL_LEN:-} VLLM_OMNI_DUPLEX_TICK_TRACE_DIR=${VLLM_OMNI_DUPLEX_TICK_TRACE_DIR:-}" >&2
   printf '%q ' "${CMD[@]}"
   echo
   exit 0
