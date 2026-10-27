@@ -73,7 +73,11 @@ in_env() {
 in_env env LAYOUT=gh200 MAX_MODEL_LEN="$MAX_MODEL_LEN" TICK_TRACE_DIR="$TRACE_DIR" PORT="$PORT" \
   bash benchmarks/duplex_session/serve.sh > "$RUN_DIR/server.log" 2>&1 &
 SERVER_PID=$!
-trap 'kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null' EXIT
+# Per-process GPU memory every 30 s (host nvidia-smi sees the container's stage processes).
+nvidia-smi --query-compute-apps=timestamp,pid,process_name,used_memory --format=csv -l 30 \
+  > "$RUN_DIR/gpu_mem.csv" 2>&1 &
+GPU_MON_PID=$!
+trap 'kill $GPU_MON_PID $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null' EXIT
 
 for _ in $(seq 1 180); do
   curl -sf "localhost:$PORT/health" >/dev/null && break

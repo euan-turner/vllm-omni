@@ -136,44 +136,57 @@ async def _generate(args: argparse.Namespace) -> int:
         )
         session_dir = out_dir / f"session{session_index}"
         t_start = time.monotonic()
-        result = await generate_sample(
-            stitched,
-            url=args.url,
-            model=args.model,
-            ref_audio=None,
-            output_root=session_dir,
-            fps=args.fps,
-            pace="realtime",
-            overwrite=True,
-            prepared=stream,
-            defer_artifacts=True,
-            instructions=args.instructions or None,
-        )
+        try:
+            result = await generate_sample(
+                stitched,
+                url=args.url,
+                model=args.model,
+                ref_audio=None,
+                output_root=session_dir,
+                fps=args.fps,
+                pace="realtime",
+                overwrite=True,
+                prepared=stream,
+                defer_artifacts=True,
+                instructions=args.instructions or None,
+            )
+        except Exception as exc:
+            # A server-side session close (e.g. a stage failure) surfaces as a
+            # websocket error. Keep the session window so the ticks traced up to
+            # the failure are still analysed.
+            result = None
+            error = f"{type(exc).__name__}: {exc}"
+        else:
+            error = result.error
         t_end = time.monotonic()
         manifest = {
             "session_index": session_index,
             "start_index": start_index,
             "t_start_monotonic": t_start,
             "t_end_monotonic": t_end,
+            "elapsed_s": t_end - t_start,
             "stream_duration_s": stream.duration,
             "num_frames": len(stream.frames),
-            "error": result.error,
-            "output_tokens": result.output_tokens,
+            "error": error,
+            "aborted": result is None,
+            "output_tokens": result.output_tokens if result is not None else None,
             "segments": [segment.as_dict() for segment in segments],
-            "session_metrics": result.session_metrics,
-            "metadata": result.metadata,
+            "session_metrics": result.session_metrics if result is not None else None,
+            "metadata": result.metadata if result is not None else None,
         }
         session_dir.mkdir(parents=True, exist_ok=True)
         (session_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
-        (session_dir / "timed_sentences.json").write_text(
-            json.dumps(result.timed_sentences, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        (session_dir / "request_metrics.json").write_text(
-            json.dumps(result.request_metrics, indent=2, default=str), encoding="utf-8"
-        )
-        write_segment_artifacts(session_dir, segments, list(result.timed_sentences), dict(result.metadata))
+        if result is not None:
+            (session_dir / "timed_sentences.json").write_text(
+                json.dumps(result.timed_sentences, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            (session_dir / "request_metrics.json").write_text(
+                json.dumps(result.request_metrics, indent=2, default=str), encoding="utf-8"
+            )
+            write_segment_artifacts(session_dir, segments, list(result.timed_sentences), dict(result.metadata))
         print(
-            f"session{session_index}: {stream.duration:.0f}s, {len(segments)} segments, error={result.error or 'none'}",
+            f"session{session_index}: {stream.duration:.0f}s planned, {t_end - t_start:.0f}s elapsed, "
+            f"{len(segments)} segments, error={error or 'none'}",
             flush=True,
         )
         return manifest

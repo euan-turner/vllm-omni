@@ -1,4 +1,4 @@
-# MiniCPM-o 4.5 three-stage duplex deploy on one GH200 (96 GB), for
+# MiniCPM-o 4.5 three-stage duplex deploy on one GH200 (~95 GiB visible to CUDA), for
 # long-context profiling. Used by benchmarks/duplex_session/serve.sh LAYOUT=gh200.
 #
 # Prototype (branch long-context-prototype). Inherits the single-H200 duplex
@@ -18,9 +18,11 @@ stages:
   - stage_id: 0
     max_num_seqs: 4
     # ~145 KiB/token: 4 x 131072 tokens is ~73 GiB, which does not fit next to
-    # Talker and Code2Wav. vLLM only requires one full-length request; with
-    # concurrent long sessions, preemption or overflow shows up in the tick trace.
-    gpu_memory_utilization: 0.6
+    # Talker and Code2Wav. vLLM only requires one full-length request (~18 GiB);
+    # with concurrent long sessions, preemption or overflow shows up in the tick
+    # trace. 0.5 of the ~95 GiB CUDA sees leaves headroom for Stage 1's
+    # unbudgeted growth over long sessions (CUDA OOM at 0.6, job 7766599).
+    gpu_memory_utilization: 0.5
   - stage_id: 1
     max_num_seqs: 4
   - stage_id: 2
