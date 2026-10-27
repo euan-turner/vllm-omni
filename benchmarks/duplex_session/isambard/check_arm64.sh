@@ -22,13 +22,17 @@ else
   echo "no skopeo/podman-hpc; skipping"
 fi
 
-echo "== aarch64 wheels (python $PYVER)"
+# pip matches --platform tags exactly (no older-glibc fallback), so list every
+# manylinux_2_x up to glibc 2.39.
+PLATFORMS=(--platform any --platform manylinux2014_aarch64)
+for minor in $(seq 17 39); do PLATFORMS+=(--platform "manylinux_2_${minor}_aarch64"); done
+
+echo "== aarch64 wheels (python $PYVER; informational: the image build resolves natively)"
 for req in vllm==0.32.0 step-audio2==1.0.0 onnxruntime av datasets==3.6.0; do
-  if pip download --quiet --no-deps --only-binary=:all: --python-version "$PYVER" \
-      --platform manylinux_2_28_aarch64 --platform manylinux_2_17_aarch64 --platform manylinux2014_aarch64 \
-      --platform any -d "$TMP" "$req" >/dev/null 2>&1; then
+  if log=$(pip download --quiet --no-deps --only-binary=:all: --python-version "$PYVER" \
+      "${PLATFORMS[@]}" -d "$TMP" "$req" 2>&1); then
     echo "ok       $req"
   else
-    echo "MISSING  $req (no aarch64 or pure-python wheel; needs a source build or an alternative)"
+    echo "MISSING  $req: $(echo "$log" | grep -m1 -E 'ERROR' || echo "$log" | tail -1)"
   fi
 done

@@ -47,12 +47,18 @@ TRACE_DIR="$RUN_DIR/ticks"
 mkdir -p "$TRACE_DIR"
 export HF_HUB_OFFLINE=1
 
+# podman-hpc --gpu mounts the host driver libraries (libnvidia-ml, libcuda) in
+# /usr/lib64, which the Ubuntu-based image does not search, so vLLM fails with
+# "Failed to infer device type". Prepend it inside the container.
+GPU_LIB_DIR=/usr/lib64
+GPU_LIB_SHIM='export LD_LIBRARY_PATH="'"$GPU_LIB_DIR"'${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; exec "$@"'
+
 in_env() {
   case "$RUNTIME" in
     podman-hpc)
       podman-hpc run --rm --gpu --net host --ipc host \
         -v "$REPO:$REPO" -v "$HF_HOME:$HF_HOME" -v "$OUT_ROOT:$OUT_ROOT" -v "$(dirname "$REF_AUDIO"):$(dirname "$REF_AUDIO")" \
-        -e HF_HOME -e HF_HUB_OFFLINE -e PYTHONPATH="$REPO" -w "$REPO" "$IMAGE" "$@" ;;
+        -e HF_HOME -e HF_HUB_OFFLINE -e PYTHONPATH="$REPO" -w "$REPO" "$IMAGE" bash -c "$GPU_LIB_SHIM" _ "$@" ;;
     apptainer)
       apptainer exec --nv --bind "$REPO,$HF_HOME,$OUT_ROOT,$(dirname "$REF_AUDIO")" \
         --env PYTHONPATH="$REPO" --pwd "$REPO" "$IMAGE" "$@" ;;
