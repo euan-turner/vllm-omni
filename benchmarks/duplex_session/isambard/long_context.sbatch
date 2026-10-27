@@ -15,7 +15,7 @@
 # nodes are assumed offline, so HF_HUB_OFFLINE=1).
 #
 # Environment:
-#   REPO           repo checkout (default: directory two levels above this script)
+#   REPO           repo checkout (default: $SLURM_SUBMIT_DIR, i.e. submit from the repo root)
 #   RUNTIME        podman-hpc | apptainer | venv (default podman-hpc)
 #   IMAGE          podman-hpc image name or apptainer .sif path (default vllm-omni-lc)
 #   VENV           venv path for RUNTIME=venv (default $REPO/.venv)
@@ -28,7 +28,10 @@
 #   OUT_ROOT       results root (default $REPO/runs/long_context)
 set -euo pipefail
 
-REPO=${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}
+# Slurm runs a copy of this script from its spool directory, so locate the repo
+# from the submit directory rather than the script path.
+REPO=${REPO:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}}
+[[ -f "$REPO/benchmarks/duplex_session/serve.sh" ]] || { echo "REPO=$REPO is not the vllm-omni checkout; submit from the repo root or set REPO" >&2; exit 2; }
 RUNTIME=${RUNTIME:-podman-hpc}
 IMAGE=${IMAGE:-vllm-omni-lc}
 VENV=${VENV:-$REPO/.venv}
