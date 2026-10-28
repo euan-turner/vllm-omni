@@ -105,8 +105,23 @@ def test_tick_metrics_definitions() -> None:
     assert math.isclose(third.service_s, 1.4) and math.isclose(third.queue_s, 0.01)
     assert math.isclose(third.prefill_s + third.decode_s, third.service_s)
     assert third.deadline_miss and not ticks[1].deadline_miss
-    assert math.isclose(third.realtime_lag_s, (12.0 + 0.01 + 1.4) - (10.0 + 2))
+    assert not any(t.suspected_continuation for t in ticks)
     assert tick_metrics.tick_kind([5], None) == "listen" and tick_metrics.tick_kind([5], 1) == "speak"
+
+
+def test_update_arriving_within_half_a_unit_is_a_suspected_continuation() -> None:
+    records = [
+        _record("r", 0, t0=10.0, context=500, service=0.1, sampled=[1]),
+        _record("r", 1, t0=11.0, context=512, service=0.1, sampled=[2, 1]),
+        _record("r", 2, t0=11.04, context=524, service=0.1, sampled=[1], cuda_allocated_bytes=5),
+        {**_record("r", 3, t0=12.0, context=536, service=0.1, sampled=[1]), "status": "overflow"},
+        _record("r", 4, t0=12.3, context=548, service=0.1, sampled=[1]),
+    ]
+    ticks = tick_metrics.compute_ticks(records, listen_token_id=1)
+    assert [(t.tick_index, t.suspected_continuation) for t in ticks] == [(0, False), (1, False), (2, True), (4, True)]
+    assert ticks[2].cuda_allocated_bytes == 5 and ticks[0].cuda_reserved_bytes is None
+    row = tick_metrics.summarize_by_context(ticks, bin_tokens=1024)[0]
+    assert row["suspected_continuations"] == 2 and math.isclose(row["queue_p99_s"], 0.01)
 
 
 def test_summaries_skip_first_tick_and_fit_slope() -> None:
@@ -191,3 +206,60 @@ def test_driver_parser_requires_target_for_generate() -> None:
     assert args.modality == "audio" and args.target_minutes == 10.0 and args.sessions == 1
     with pytest.raises(SystemExit):
         driver.build_parser().parse_args(["generate", "--dataset", "d", "--out-dir", "o"])
+
+
+def test_watch_ticks_raises_only_after_stall(tmp_path) -> None:
+    import asyncio
+    import os
+
+    trace = tmp_path / "ticks_stage0_pid1.jsonl"
+    trace.write_text("{}\n")
+    now = [trace.stat().st_mtime]
+
+    async def run() -> None:
+        watcher = asyncio.ensure_future(driver.watch_ticks(tmp_path, 10.0, poll_s=0.01, clock=lambda: now[0]))
+        now[0] += 5
+        await asyncio.sleep(0.05)
+        assert not watcher.done()
+        os.utime(trace, (now[0], now[0]))
+        now[0] += 9
+        await asyncio.sleep(0.05)
+        assert not watcher.done()
+        now[0] += 2
+        with pytest.raises(driver.TickStallError):
+            await asyncio.wait_for(watcher, 1.0)
+
+    asyncio.run(run())
+
+
+def test_until_stall_returns_work_or_cancels_it_on_stall() -> None:
+    import asyncio
+
+    async def run() -> None:
+        never = asyncio.get_running_loop().create_future()
+        assert await driver.until_stall(asyncio.sleep(0, result="done"), never) == "done"
+
+        cancelled = asyncio.Event()
+
+        async def hangs() -> None:
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        async def stalls() -> None:
+            await asyncio.sleep(0.01)
+            raise driver.TickStallError("stalled")
+
+        with pytest.raises(driver.TickStallError):
+            await driver.until_stall(hangs(), asyncio.ensure_future(stalls()))
+        assert cancelled.is_set()
+
+    asyncio.run(run())
+
+
+def test_driver_parser_tick_stall_default_and_disable() -> None:
+    base = ["generate", "--dataset", "d", "--out-dir", "o", "--target-minutes", "1"]
+    assert driver.build_parser().parse_args(base).tick_stall_s == 120.0
+    assert driver.build_parser().parse_args([*base, "--tick-stall-s", "0"]).tick_stall_s == 0.0

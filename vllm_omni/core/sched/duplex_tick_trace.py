@@ -15,6 +15,9 @@ Metric definitions over these records live in
 Dependencies: vLLM v1 ``Request`` / ``SchedulerOutput`` (read-only access).
 Timestamps are ``time.monotonic()`` (CLOCK_MONOTONIC, shared by processes on
 one host), so they can be joined with a client running on the same node.
+Each closed tick also records this process's CUDA allocator state (debugging
+GPU memory growth in long sessions); it is read only when CUDA is already
+initialised in the process, so tracing never creates a CUDA context.
 """
 
 from __future__ import annotations
@@ -51,6 +54,20 @@ class TickRecord:
     num_scheduled_tokens: int = 0
     sampled_token_ids: list[int] = field(default_factory=list)
     status: str = "open"
+    # torch.cuda.memory_allocated / memory_reserved at t_end; None without CUDA.
+    cuda_allocated_bytes: int | None = None
+    cuda_reserved_bytes: int | None = None
+
+
+def cuda_memory_bytes() -> tuple[int | None, int | None]:
+    """(allocated, reserved) bytes of this process's CUDA caching allocator, or (None, None)."""
+    try:
+        import torch
+    except ImportError:
+        return None, None
+    if not torch.cuda.is_available() or not torch.cuda.is_initialized():
+        return None, None
+    return int(torch.cuda.memory_allocated()), int(torch.cuda.memory_reserved())
 
 
 class DuplexTickTracer:
@@ -61,10 +78,18 @@ class DuplexTickTracer:
     requests are traced.
     """
 
-    def __init__(self, stage_id: int | None, *, trace_dir: str | None = None, clock=time.monotonic) -> None:
+    def __init__(
+        self,
+        stage_id: int | None,
+        *,
+        trace_dir: str | None = None,
+        clock=time.monotonic,
+        memory_probe=cuda_memory_bytes,
+    ) -> None:
         trace_dir = trace_dir if trace_dir is not None else os.environ.get(TICK_TRACE_DIR_ENV)
         self.enabled = bool(trace_dir) and (stage_id or 0) == 0
         self._clock = clock
+        self._memory_probe = memory_probe
         self._open: dict[str, TickRecord] = {}
         self._pending: dict[str, list[TickRecord]] = {}
         self._tick_counts: dict[str, int] = {}
@@ -159,6 +184,7 @@ class DuplexTickTracer:
         record.t_end = self._clock()
         record.sampled_token_ids = [int(t) for t in (getattr(request, "output_token_ids", None) or ())]
         record.status = status
+        record.cuda_allocated_bytes, record.cuda_reserved_bytes = self._memory_probe()
         self._write(record)
 
     def on_overflow(self, request_id: str) -> None:

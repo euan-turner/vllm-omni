@@ -9,7 +9,7 @@ quality drops with depth in a long stream. Model: one GH200 on Isambard-AI.
 | File | Role |
 | --- | --- |
 | `vllm_omni/core/sched/duplex_tick_trace.py` | Stage-0 scheduler writes one JSON line per tick when `VLLM_OMNI_DUPLEX_TICK_TRACE_DIR` is set |
-| [`tick_metrics.py`](tick_metrics.py) | Tick, tick-deadline (1 s) and lag definitions |
+| [`tick_metrics.py`](tick_metrics.py) | Tick, tick-deadline (1 s), queue and continuation definitions |
 | [`stitch.py`](stitch.py) | Cycles RTD_Omni samples into one stream, segments aligned to 1 s units |
 | [`run_long_session.py`](run_long_session.py) | `generate`: stream stitched sessions in real time; `evaluate`: judge every segment |
 | [`analyze.py`](analyze.py) | Joins ticks with sessions; `analysis/` CSVs, `summary.json`, plots |

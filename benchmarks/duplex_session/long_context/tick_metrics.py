@@ -8,9 +8,13 @@ long-context-prototype; definitions here are the ones the plots use.
 
 Definitions (all times in seconds, ``time.monotonic`` in the EngineCore):
 
-- **Tick**: one streaming input update (one 1 s client append) applied to a
-  session: its prefill plus the decode steps that follow it until the
-  segment stops. Only records with ``status == "stop"`` are complete ticks.
+- **Tick**: one streaming input update applied to a session: its prefill
+  plus the decode steps that follow it until the segment stops. Only records
+  with ``status == "stop"`` are complete ticks. An update is either a 1 s
+  client append or a 1 s silence unit the server injects to continue a
+  response after the model chose to listen mid-response (see
+  ``vllm_omni/engine/duplex/session/model_channel.py``). Both are real
+  Stage-0 work and count as ticks, so ticks are not one per second of input.
 - **context_tokens**: KV length once the tick's prefill is done
   (``context_tokens_before + prefill_tokens``).
 - **service_s** = ``t_end - t_first_scheduled``: the tick's prefill and decodes.
@@ -26,8 +30,15 @@ Definitions (all times in seconds, ``time.monotonic`` in the EngineCore):
 - **Tick deadline**: ``TICK_DEADLINE_S`` = 1.0, the input unit period. A tick
   misses it when ``service_s > TICK_DEADLINE_S``; ticks are serial within a
   session, so sustained misses grow the input backlog without bound.
-- **realtime_lag_s** = ``t_end - (t_arrival[first tick] + tick_index * UNIT_S)``:
-  how far behind the real-time input schedule the session's output is.
+- **suspected_continuation**: the tick arrived less than
+  ``CONTINUATION_GAP_S`` (0.5 s) after the session's previous update. Client
+  appends arrive one per second, so such a tick is most likely a server
+  silence continuation. Heuristic: a late client append followed by an
+  on-time one is flagged too; the trace does not mark continuations.
+- **Backlog**: ``queue_s`` growing over a session. There is no separate lag
+  metric: tick index is not input time (see Tick).
+- **cuda_allocated_bytes / cuda_reserved_bytes**: Stage-0 process CUDA
+  allocator state when the tick closed (None when not recorded).
 
 External dependencies: none (stdlib only).
 """
@@ -44,6 +55,7 @@ from typing import Any
 
 TICK_DEADLINE_S = 1.0
 UNIT_S = 1.0
+CONTINUATION_GAP_S = 0.5 * UNIT_S
 
 
 @dataclass(frozen=True)
@@ -61,8 +73,10 @@ class Tick:
     decode_s: float
     queue_s: float
     latency_s: float
-    realtime_lag_s: float
     deadline_miss: bool
+    suspected_continuation: bool
+    cuda_allocated_bytes: int | None = None
+    cuda_reserved_bytes: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -91,21 +105,22 @@ def compute_ticks(records: Iterable[dict[str, Any]], *, listen_token_id: int | N
         and all(record.get(key) is not None for key in ("t_first_scheduled", "t_prefill_done", "t_end"))
     ]
     complete.sort(key=lambda record: (record["request_id"], record["tick_index"]))
-    first_arrival: dict[str, float] = {}
-    for record in records:
-        rid = record["request_id"]
-        if record.get("tick_index") == 0:
-            first_arrival[rid] = float(record["t_arrival"])
+    # Gaps use every received update, complete or not, so a dropped record
+    # cannot make its successor look like a continuation.
+    arrivals: dict[tuple[str, int], float] = {
+        (record["request_id"], int(record["tick_index"])): float(record["t_arrival"]) for record in records
+    }
     ticks = []
     for record in complete:
         rid = record["request_id"]
-        anchor = first_arrival.get(rid, float(record["t_arrival"]))
+        index = int(record["tick_index"])
+        previous = arrivals.get((rid, index - 1))
         service = record["t_end"] - record["t_first_scheduled"]
         sampled = list(record.get("sampled_token_ids") or ())
         ticks.append(
             Tick(
                 request_id=rid,
-                tick_index=int(record["tick_index"]),
+                tick_index=index,
                 kind=tick_kind(sampled, listen_token_id),
                 context_tokens=int(record.get("context_tokens_before") or 0) + int(record.get("prefill_tokens") or 0),
                 prefill_tokens=int(record.get("prefill_tokens") or 0),
@@ -117,14 +132,17 @@ def compute_ticks(records: Iterable[dict[str, Any]], *, listen_token_id: int | N
                 decode_s=record["t_end"] - record["t_prefill_done"],
                 queue_s=record["t_first_scheduled"] - record["t_arrival"],
                 latency_s=record["t_end"] - record["t_arrival"],
-                realtime_lag_s=record["t_end"] - (anchor + int(record["tick_index"]) * UNIT_S),
                 deadline_miss=service > TICK_DEADLINE_S,
+                suspected_continuation=previous is not None
+                and float(record["t_arrival"]) - previous < CONTINUATION_GAP_S,
+                cuda_allocated_bytes=record.get("cuda_allocated_bytes"),
+                cuda_reserved_bytes=record.get("cuda_reserved_bytes"),
             )
         )
     return ticks
 
 
-def _percentile(values: Sequence[float], q: float) -> float:
+def percentile(values: Sequence[float], q: float) -> float:
     ordered = sorted(values)
     if not ordered:
         return math.nan
@@ -137,7 +155,7 @@ def _percentile(values: Sequence[float], q: float) -> float:
 def summarize_by_context(
     ticks: Iterable[Tick], *, bin_tokens: int = 2048, skip_first_tick: bool = True
 ) -> list[dict[str, Any]]:
-    """Service-time percentiles and deadline-miss rate per (context bin, kind)."""
+    """Service/queue/latency percentiles and deadline-miss rate per (context bin, kind)."""
     groups: dict[tuple[int, str], list[Tick]] = {}
     for tick in ticks:
         if skip_first_tick and tick.tick_index == 0:
@@ -152,11 +170,14 @@ def summarize_by_context(
                 "context_hi": (bin_index + 1) * bin_tokens,
                 "kind": kind,
                 "count": len(members),
-                "service_p50_s": _percentile(service, 0.5),
-                "service_p90_s": _percentile(service, 0.9),
-                "service_p99_s": _percentile(service, 0.99),
-                "prefill_p50_s": _percentile([tick.prefill_s for tick in members], 0.5),
-                "decode_p50_s": _percentile([tick.decode_s for tick in members], 0.5),
+                "service_p50_s": percentile(service, 0.5),
+                "service_p90_s": percentile(service, 0.9),
+                "service_p99_s": percentile(service, 0.99),
+                "prefill_p50_s": percentile([tick.prefill_s for tick in members], 0.5),
+                "decode_p50_s": percentile([tick.decode_s for tick in members], 0.5),
+                "queue_p99_s": percentile([tick.queue_s for tick in members], 0.99),
+                "latency_p99_s": percentile([tick.latency_s for tick in members], 0.99),
+                "suspected_continuations": sum(tick.suspected_continuation for tick in members),
                 "sampled_tokens_mean": statistics.fmean(tick.num_sampled_tokens for tick in members),
                 "deadline_miss_rate": sum(tick.deadline_miss for tick in members) / len(members),
             }

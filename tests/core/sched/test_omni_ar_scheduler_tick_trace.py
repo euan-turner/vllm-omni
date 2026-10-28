@@ -97,6 +97,20 @@ def test_first_tick_then_appended_tick_lifecycle(tmp_path) -> None:
     assert second["num_decode_steps"] == 0 and second["sampled_token_ids"] == [5]
 
 
+def test_closed_tick_records_cuda_memory_from_probe(tmp_path) -> None:
+    readings = iter([(100, 200), (None, None)])
+    tracer = DuplexTickTracer(0, trace_dir=str(tmp_path), clock=FakeClock(), memory_probe=lambda: next(readings))
+    session = _session()
+    tracer.on_add_request(session, None)
+    tracer.on_segment_stop(session)
+    tracer.on_add_request(session, session)
+    tracer.on_apply_update(session, 12)
+    tracer.on_segment_stop(session)
+    first, second = _records(tracer)
+    assert (first["cuda_allocated_bytes"], first["cuda_reserved_bytes"]) == (100, 200)
+    assert (second["cuda_allocated_bytes"], second["cuda_reserved_bytes"]) == (None, None)
+
+
 def test_chunked_prefill_finishes_when_all_tokens_scheduled(tmp_path) -> None:
     clock = FakeClock()
     tracer = DuplexTickTracer(0, trace_dir=str(tmp_path), clock=clock)

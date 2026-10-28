@@ -26,6 +26,10 @@
 #   DATASET        local Omni-DuplexEval mirror (default $HF_HOME/omni_duplex_eval)
 #   REF_AUDIO      MiniCPM-o reference voice wav (required)
 #   OUT_ROOT       results root (default $REPO/runs/long_context)
+#   INPUT_WAIT_TIMEOUT_S  server stage input-wait timeout (default 0 = off: a
+#                  silent model starves Stage 2 for minutes, which is not a hang)
+#   TICK_STALL_S   driver hang detection: abort after this long without a
+#                  Stage-0 tick record (default 120; 0 disables)
 set -euo pipefail
 
 # Slurm runs a copy of this script from its spool directory, so locate the repo
@@ -43,6 +47,8 @@ DATASET=${DATASET:-$HF_HOME/omni_duplex_eval}
 REF_AUDIO=${REF_AUDIO:?set REF_AUDIO to the MiniCPM-o reference voice wav}
 OUT_ROOT=${OUT_ROOT:-$REPO/runs/long_context}
 PORT=${PORT:-8099}
+INPUT_WAIT_TIMEOUT_S=${INPUT_WAIT_TIMEOUT_S:-0}
+TICK_STALL_S=${TICK_STALL_S:-120}
 
 RUN_ID="$(date +%Y%m%d_%H%M%S)_${MODALITY}_${TARGET_MINUTES}min_s${SESSIONS}_${SLURM_JOB_ID:-local}"
 RUN_DIR="$OUT_ROOT/$RUN_ID"
@@ -71,13 +77,14 @@ in_env() {
 }
 
 in_env env LAYOUT=gh200 MAX_MODEL_LEN="$MAX_MODEL_LEN" TICK_TRACE_DIR="$TRACE_DIR" PORT="$PORT" \
-  bash benchmarks/duplex_session/serve.sh > "$RUN_DIR/server.log" 2>&1 &
+  VLLM_OMNI_INPUT_WAIT_TIMEOUT_S="$INPUT_WAIT_TIMEOUT_S" bash benchmarks/duplex_session/serve.sh > "$RUN_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 # Per-process GPU memory every 30 s (host nvidia-smi sees the container's stage processes).
 nvidia-smi --query-compute-apps=timestamp,pid,process_name,used_memory --format=csv -l 30 \
   > "$RUN_DIR/gpu_mem.csv" 2>&1 &
 GPU_MON_PID=$!
-trap 'kill $GPU_MON_PID $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null' EXIT
+# Keep the job's exit status: under set -e, the killed server's 143 from `wait` would replace it.
+trap 'rc=$?; kill $GPU_MON_PID $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null || true; exit $rc' EXIT
 
 for _ in $(seq 1 180); do
   curl -sf "localhost:$PORT/health" >/dev/null && break
@@ -94,7 +101,7 @@ COMMON=(--dataset "$DATASET" --split RTD_Omni --ref-audio "$REF_AUDIO" --url "ws
 in_env python "$DRIVER" generate "${COMMON[@]}" --target-minutes 1 --out-dir "$RUN_DIR/warmup" || true
 
 in_env python "$DRIVER" generate "${COMMON[@]}" --target-minutes "$TARGET_MINUTES" --sessions "$SESSIONS" \
-  --tick-trace-dir "$TRACE_DIR" --out-dir "$RUN_DIR/measured" || echo "driver reported session errors (see manifests)"
+  --tick-trace-dir "$TRACE_DIR" --tick-stall-s "$TICK_STALL_S" --out-dir "$RUN_DIR/measured" || echo "driver reported session errors (see manifests)"
 
 in_env python benchmarks/duplex_session/long_context/analyze.py "$RUN_DIR/measured" \
   --tick-trace-dir "$TRACE_DIR" --model openbmb/MiniCPM-o-4_5

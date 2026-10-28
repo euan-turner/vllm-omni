@@ -42,6 +42,7 @@ from tick_metrics import (  # noqa: E402
     Tick,
     compute_ticks,
     linear_fit,
+    percentile,
     read_records,
     summarize_by_context,
 )
@@ -193,15 +194,23 @@ def plot(out_dir: Path, ticks: list[Tick], tick_rows: list[dict[str, Any]], qual
         rows = [row for row in tick_rows if row["session_index"] == session_index]
         ax.plot(
             [row["tick_index"] for row in rows],
-            [row["realtime_lag_s"] for row in rows],
+            [row["latency_s"] for row in rows],
             linewidth=1,
-            label=f"session {session_index}",
+            label=f"session {session_index} latency",
         )
-    ax.set_xlabel("tick (input seconds)")
-    ax.set_ylabel("lag behind real time (s)")
+        ax.plot(
+            [row["tick_index"] for row in rows],
+            [row["queue_s"] for row in rows],
+            linewidth=1,
+            linestyle=":",
+            label=f"session {session_index} queue",
+        )
+    ax.axhline(TICK_DEADLINE_S, color="#B0413E", linestyle="--", linewidth=1, label="tick deadline")
+    ax.set_xlabel("tick index")
+    ax.set_ylabel("seconds (arrival to end / to first step)")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(out_dir / "realtime_lag.png", dpi=150)
+    fig.savefig(out_dir / "latency_queue_by_tick.png", dpi=150)
     plt.close(fig)
 
     if quality:
@@ -263,6 +272,8 @@ def main(argv: list[str] | None = None) -> int:
         "max_context_tokens": max((tick.context_tokens for tick in ticks), default=0),
         "deadline_miss_rate": (sum(t.deadline_miss for t in steady) / len(steady)) if steady else None,
         "overflow_records": len(overflow),
+        "queue_p99_s": percentile([t.queue_s for t in steady], 0.99) if steady else None,
+        "suspected_continuation_ticks": sum(t.suspected_continuation for t in ticks),
         "by_context": summarize_by_context(ticks, bin_tokens=args.bin_tokens),
         "linear_fit": {kind: linear_fit(ticks, kind=kind) for kind in ("listen", "speak")},
         "quality": {

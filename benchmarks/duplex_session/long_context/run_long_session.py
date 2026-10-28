@@ -10,6 +10,10 @@ score can be compared across its depths in the stream (local probe).
 
 Per-tick timing is written by the server (``serve.sh TICK_TRACE_DIR=...``),
 not by this driver; ``analyze.py`` joins the two by session start order.
+With ``--tick-trace-dir``, the driver also treats ``--tick-stall-s`` without a
+new Stage-0 tick record as a server hang and ends every session as aborted
+(the server's own input-wait timeout is off for long runs, since a model that
+listens silently for minutes is legitimate).
 
 External dependencies: vllm_omni.benchmarks.duplex (client, dataset, judge),
 ``datasets`` for local Hugging Face splits, a running duplex server and, for
@@ -28,12 +32,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import subprocess
 import sys
 import time
+from collections.abc import Awaitable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -41,6 +47,39 @@ from stitch import Segment, plan_segments, segment_duration_s, split_sentences, 
 
 DEFAULT_MODEL = "openbmb/MiniCPM-o-4_5"
 STITCHED_SPLIT = "stitched"
+
+T = TypeVar("T")
+
+
+class TickStallError(RuntimeError):
+    """No Stage-0 tick record was written for longer than the stall limit."""
+
+
+def latest_tick_mtime(trace_dir: Path) -> float | None:
+    return max((path.stat().st_mtime for path in trace_dir.glob("ticks_stage0_*.jsonl")), default=None)
+
+
+async def watch_ticks(trace_dir: Path, stall_s: float, *, poll_s: float = 5.0, clock=time.time) -> None:
+    """Raise ``TickStallError`` once no tick file has been written for ``stall_s`` (counting from the call)."""
+    started = clock()
+    while True:
+        await asyncio.sleep(poll_s)
+        idle = clock() - max(latest_tick_mtime(trace_dir) or started, started)
+        if idle > stall_s:
+            raise TickStallError(f"no Stage-0 tick for {idle:.0f}s (limit {stall_s:.0f}s); server presumed hung")
+
+
+async def until_stall(work: Awaitable[T], stall: asyncio.Future) -> T:
+    """Await ``work``; if ``stall`` finishes first, cancel ``work`` and raise the stall's exception."""
+    task = asyncio.ensure_future(work)
+    await asyncio.wait({task, stall}, return_when=asyncio.FIRST_COMPLETED)
+    if task.done():
+        return task.result()
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
+    stall.result()
+    raise TickStallError("stall watchdog ended without an error")
 
 
 def _git_sha() -> str:
@@ -111,10 +150,17 @@ async def _generate(args: argparse.Namespace) -> int:
         "url": args.url,
         "model": args.model,
         "tick_trace_dir": args.tick_trace_dir,
+        "tick_stall_s": args.tick_stall_s,
         "argv": sys.argv,
     }
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "run.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
+
+    loop = asyncio.get_running_loop()
+    if args.tick_trace_dir and args.tick_stall_s > 0:
+        stall: asyncio.Future = asyncio.ensure_future(watch_ticks(Path(args.tick_trace_dir), args.tick_stall_s))
+    else:
+        stall = loop.create_future()
 
     async def run_session(session_index: int, start_index: int) -> dict[str, Any]:
         await asyncio.sleep(session_index * args.stagger_s)
@@ -137,18 +183,21 @@ async def _generate(args: argparse.Namespace) -> int:
         session_dir = out_dir / f"session{session_index}"
         t_start = time.monotonic()
         try:
-            result = await generate_sample(
-                stitched,
-                url=args.url,
-                model=args.model,
-                ref_audio=None,
-                output_root=session_dir,
-                fps=args.fps,
-                pace="realtime",
-                overwrite=True,
-                prepared=stream,
-                defer_artifacts=True,
-                instructions=args.instructions or None,
+            result = await until_stall(
+                generate_sample(
+                    stitched,
+                    url=args.url,
+                    model=args.model,
+                    ref_audio=None,
+                    output_root=session_dir,
+                    fps=args.fps,
+                    pace="realtime",
+                    overwrite=True,
+                    prepared=stream,
+                    defer_artifacts=True,
+                    instructions=args.instructions or None,
+                ),
+                stall,
             )
         except Exception as exc:
             # A server-side session close (e.g. a stage failure) surfaces as a
@@ -191,7 +240,12 @@ async def _generate(args: argparse.Namespace) -> int:
         )
         return manifest
 
-    manifests = await asyncio.gather(*(run_session(index, start) for index, start in enumerate(starts)))
+    try:
+        manifests = await asyncio.gather(*(run_session(index, start) for index, start in enumerate(starts)))
+    finally:
+        stall.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await stall
     return 0 if all(not manifest["error"] for manifest in manifests) else 1
 
 
@@ -258,7 +312,13 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--session-stride", type=int, default=7)
     generate.add_argument("--stagger-s", type=float, default=2.0)
     generate.add_argument("--instructions", default="")
-    generate.add_argument("--tick-trace-dir", help="recorded in run.json for analyze.py")
+    generate.add_argument("--tick-trace-dir", help="recorded in run.json for analyze.py; enables the stall watchdog")
+    generate.add_argument(
+        "--tick-stall-s",
+        type=float,
+        default=120.0,
+        help="abort all sessions after this long without a new Stage-0 tick record (0 disables)",
+    )
     evaluate = sub.choices["evaluate"]
     evaluate.add_argument("--judge-base-url", default="http://127.0.0.1:8000")
     evaluate.add_argument("--judge-model", required=True)
