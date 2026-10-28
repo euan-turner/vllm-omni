@@ -65,8 +65,37 @@ awk -F', ' 'NR>1 && $4 ~ /MiB/ {m=$4+0; p=$2; if(!(p in f)){f[p]=m; t0[p]=$1}; l
 
 echo "== host RSS per process (MiB): first, last, max"
 awk -F, '{k=$3" "$4; if(!(k in f)){f[k]=$2; t0[k]=$1}; l[k]=$2; t1[k]=$1; if($2>x[k])x[k]=$2}
-  END{for(k in f) if(x[k]>=1024) printf "%7d %7d %7d  %s  (%s -> %s)\n", f[k], l[k], x[k], k, t0[k], t1[k]}' \
+  END{for(k in f) if(x[k]>=1024 || k ~ /^- \[/) printf "%7d %7d %7d  %s  (%s -> %s)\n", f[k], l[k], x[k], k, t0[k], t1[k]}' \
   "$RUN/host_mem.csv" 2>/dev/null | sort -k3 -nr | head -10
+
+echo "== duplex debug lines (~10 per source)"
+python3 - "$RUN/server.log" <<'EOF'
+import collections, json, re, sys
+by = collections.defaultdict(list)
+try:
+    lines = open(sys.argv[1], errors="replace")
+except OSError:
+    sys.exit("(no server.log)")
+for line in lines:
+    m = re.search(r"(\d\d:\d\d:\d\d).*\[duplex-debug (\S+)\] (\{.*\})", line)
+    if m:
+        by[m.group(2)].append((m.group(1), json.loads(m.group(3))))
+gb = lambda b: "-" if b is None else f"{b / 2**30:.1f}G"
+mb = lambda b: f"{b / 2**20:.0f}M"
+for name, rows in sorted(by.items()):
+    print(f"-- {name} ({len(rows)} lines)")
+    for ts, f in rows[:: max(1, len(rows) // 10)] + rows[-1:]:
+        if name.endswith("-sampling"):
+            print(ts, f)
+        elif name.endswith("-talker-state"):
+            parts = [f"{k.strip('_')}={v['entries']}/{mb(v['cpu_bytes'])}/{mb(v['device_bytes'])}/{v['items']}"
+                     for k, v in f.items() if isinstance(v, dict)]
+            print(ts, "rss", gb(f.get("rss_bytes")), " ".join(parts))
+        else:
+            reqs = " ".join(f"[{r['num_prompt_tokens']}p {r['num_output_tokens']}o cpu={mb(r['cpu_bytes'])} "
+                            f"items={r['items']}]" for r in f.get("running", []))
+            print(ts, "rss", gb(f.get("rss_bytes")), "waiting", f.get("waiting"), reqs)
+EOF
 
 echo "== stage timings per response (11 evenly spaced)"
 grep -o 'OmniTiming.*' "$RUN/server.log" 2>/dev/null \

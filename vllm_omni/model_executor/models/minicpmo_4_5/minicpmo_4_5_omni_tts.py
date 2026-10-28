@@ -33,6 +33,7 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.logits_processor import LogitsContext, LogitsProcessor
 
+from vllm_omni.core.sched.duplex_debug_log import PeriodicDebugLog, footprint, rss_bytes
 from vllm_omni.engine.duplex.intermediate import get_tts_handoff
 from vllm_omni.model_executor.models.minicpmo_4_5 import (
     MINICPMO45_DUPLEX_CODEC_TOKENS_PER_CHUNK,
@@ -1325,6 +1326,7 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
         terminates this step (empty condition, codec EOS already sampled, or
         the offline length cap) are recorded for the sampler.
         """
+        self._debug_log_state()
         if isinstance(model_outputs, OmniOutput):
             return model_outputs
         hidden = model_outputs
@@ -1459,6 +1461,7 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
         model_outputs: torch.Tensor | OmniOutput,
         **kwargs: Any,
     ) -> OmniOutput:
+        self._debug_log_state()
         if isinstance(model_outputs, OmniOutput):
             return model_outputs
         hidden = model_outputs
@@ -2156,6 +2159,29 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
             device = current_omni_platform.get_torch_device()
         hidden_size = int(getattr(self, "_hidden_size", 768) or 768)
         return torch.zeros((num_tokens, hidden_size), device=device, dtype=torch.bfloat16)
+
+    def _debug_log_state(self) -> None:
+        """Debug (``VLLM_OMNI_DUPLEX_DEBUG_LOG_S``): host RSS and per-request state sizes, rate-limited."""
+        debug = getattr(self, "_duplex_debug_log", None)
+        if debug is None:
+            debug = self._duplex_debug_log = PeriodicDebugLog("stage1-talker-state")
+        if not debug.due():
+            return
+        fields: dict[str, Any] = {"rss_bytes": rss_bytes()}
+        for name in (
+            "_decode_codec_ids",
+            "_request_audio_states",
+            "_request_condition_states",
+            "_request_generators",
+            "_request_codec_device_states",
+            "_request_codec_device_inputs",
+            "_request_codec_history",
+            "_deferred_cleanup_ids",
+        ):
+            state = getattr(self, name, None)
+            if state is not None:
+                fields[name] = {"entries": len(state), **footprint(state)}
+        debug.emit(fields)
 
     def forward(
         self,

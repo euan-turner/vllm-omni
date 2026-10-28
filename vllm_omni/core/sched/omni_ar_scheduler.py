@@ -23,6 +23,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
+from vllm_omni.core.sched.duplex_debug_log import PeriodicDebugLog, footprint, rss_bytes
 from vllm_omni.core.sched.duplex_tick_trace import DuplexTickTracer
 from vllm_omni.core.sched.fast_allocate import install_decode_allocate_fast_path
 from vllm_omni.core.sched.omni_scheduler_mixin import OmniSchedulerMixin
@@ -193,6 +194,7 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
         self._held_token_ids: dict[str, list[int]] = {}
         self._init_prefill_admission_policy()
         self._tick_tracer = DuplexTickTracer(getattr(self.vllm_config.model_config, "stage_id", 0))
+        self._debug_log = PeriodicDebugLog(f"stage{getattr(self.vllm_config.model_config, 'stage_id', 0)}-scheduler")
 
     def add_request(self, request: Request) -> None:
         if request.request_id in getattr(self, "_overflowed_streaming_requests", ()):
@@ -794,6 +796,24 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
         tracer = getattr(self, "_tick_tracer", None)
         if tracer is not None and tracer.enabled:
             tracer.on_schedule(scheduler_output.num_scheduled_tokens)
+        debug = getattr(self, "_debug_log", None)
+        if debug is not None and debug.due():
+            debug.emit(
+                {
+                    "rss_bytes": rss_bytes(),
+                    "running": [
+                        {
+                            "request_id": request.request_id[-24:],
+                            "num_prompt_tokens": request.num_prompt_tokens,
+                            "num_computed_tokens": request.num_computed_tokens,
+                            "num_output_tokens": request.num_output_tokens,
+                            **footprint(vars(request)),
+                        }
+                        for request in self.running
+                    ],
+                    "waiting": len(self.waiting),
+                }
+            )
         self._postprocess_omni_schedule_output(
             scheduler_output,
             include_cached_payloads=True,

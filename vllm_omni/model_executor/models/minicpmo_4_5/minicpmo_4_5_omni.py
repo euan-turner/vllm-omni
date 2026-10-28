@@ -36,6 +36,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 
+from vllm_omni.core.sched.duplex_debug_log import PeriodicDebugLog
 from vllm_omni.model_executor.duplex_sampling import DuplexSamplingRow
 from vllm_omni.model_executor.models.minicpmo_4_5.duplex.policy import MiniCPMO45DuplexPolicy
 from vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni_llm import (
@@ -1319,9 +1320,11 @@ class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
                 logits, stage2_rows, recent, token_ids, row_params, sampling_metadata
             )
             for row_idx, sampled in zip(stage2_rows, draws.tolist(), strict=True):
+                raw = sampled
                 self._record_minicpmo45_duplex_generation_token(row_idx, sampled)
                 sampled = self._maybe_cut_minicpmo45_native_duplex_text_chunk(sampled, recent[row_idx], token_ids)
                 resolved[row_idx] = self._finalize_minicpmo45_native_duplex_sample(row_idx, sampled, token_ids)
+                self._minicpmo45_duplex_debug_count(raw, resolved[row_idx], token_ids)
         return [int(resolved[row_idx]) for row_idx in row_idxs]
 
     def _sample_minicpmo45_native_duplex_rows_deferred(
@@ -1451,6 +1454,7 @@ class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
                     pending.rewinds.get(pos, lambda: None)()
                 elif pending.stage2[pos]:
                     self._record_minicpmo45_duplex_generation_token(row_idx, int(raw))
+                    self._minicpmo45_duplex_debug_count(int(raw), int(_final), pending.token_ids)
             for pos, row_idx in enumerate(pending.row_idxs):
                 self._record_minicpmo45_duplex_terminator(row_idx, int(values[pos][0]), pending.token_ids)
         finally:
@@ -1552,6 +1556,27 @@ class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         ):
             return int(tts_bos_id)
         return int(sampled)
+
+    def _minicpmo45_duplex_debug_count(self, raw: int, final: int, token_ids: dict[str, int]) -> None:
+        """Debug (``VLLM_OMNI_DUPLEX_DEBUG_LOG_S``): count listens rewritten to tts_bos vs tts_bos sampled."""
+        debug = getattr(self, "_minicpmo45_duplex_debug", None)
+        if debug is None:
+            debug = (
+                PeriodicDebugLog("stage0-sampling"),
+                dict.fromkeys(("samples", "listen_sampled", "listen_rewritten_to_tts_bos", "tts_bos_sampled"), 0),
+            )
+            self._minicpmo45_duplex_debug = debug
+        log, counts = debug
+        if not log.enabled:
+            return
+        listen_id = token_ids.get("listen_token_id", -1)
+        tts_bos_id = token_ids.get("tts_bos_token_id", -1)
+        counts["samples"] += 1
+        counts["listen_sampled"] += raw == listen_id
+        counts["listen_rewritten_to_tts_bos"] += raw == listen_id and final == tts_bos_id
+        counts["tts_bos_sampled"] += raw == tts_bos_id
+        if log.due():
+            log.emit(counts)
 
     def _record_minicpmo45_duplex_generation_token(self, row_idx: int, sampled: int) -> None:
         """Track tokens returned by the model-policy decoder.

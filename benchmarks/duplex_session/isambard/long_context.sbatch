@@ -22,7 +22,7 @@
 #   MODALITY       av | audio (default av)
 #   TARGET_MINUTES stream length (default 30 for av, 120 for audio)
 #   SESSIONS       concurrent long sessions (default 1)
-#   MAX_MODEL_LEN  Stage-0 context (default 131072; >40960 is explicit overflow)
+#   MAX_MODEL_LEN  Stage-0 context (default and maximum 40960, the HF limit)
 #   DATASET        local Omni-DuplexEval mirror (default $HF_HOME/omni_duplex_eval)
 #   REF_AUDIO      MiniCPM-o reference voice wav (required)
 #   OUT_ROOT       results root (default $REPO/runs/long_context)
@@ -31,6 +31,8 @@
 #   ALLOC_CONF     server PYTORCH_CUDA_ALLOC_CONF (default expandable_segments:True)
 #   TICK_STALL_S   driver hang detection: abort after this long without a
 #                  Stage-0 tick record (default 120; 0 disables)
+#   DEBUG_LOG_S    server [duplex-debug] lines every N s: Stage-0 listen->tts_bos
+#                  rewrites, Talker state sizes, per-stage RSS (default 30; 0 off)
 set -euo pipefail
 
 # Slurm runs a copy of this script from its spool directory, so locate the repo
@@ -43,7 +45,7 @@ VENV=${VENV:-$REPO/.venv}
 MODALITY=${MODALITY:-av}
 if [[ "$MODALITY" == av ]]; then TARGET_MINUTES=${TARGET_MINUTES:-30}; else TARGET_MINUTES=${TARGET_MINUTES:-120}; fi
 SESSIONS=${SESSIONS:-1}
-MAX_MODEL_LEN=${MAX_MODEL_LEN:-131072}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-40960}
 DATASET=${DATASET:-$HF_HOME/omni_duplex_eval}
 REF_AUDIO=${REF_AUDIO:?set REF_AUDIO to the MiniCPM-o reference voice wav}
 OUT_ROOT=${OUT_ROOT:-$REPO/runs/long_context}
@@ -54,6 +56,7 @@ INPUT_WAIT_TIMEOUT_S=${INPUT_WAIT_TIMEOUT_S:-0}
 # starves Stage 1/2 (allocated stays flat). Expandable segments reuse memory.
 ALLOC_CONF=${ALLOC_CONF:-expandable_segments:True}
 TICK_STALL_S=${TICK_STALL_S:-120}
+DEBUG_LOG_S=${DEBUG_LOG_S:-30}
 
 RUN_ID="$(date +%Y%m%d_%H%M%S)_${MODALITY}_${TARGET_MINUTES}min_s${SESSIONS}_${SLURM_JOB_ID:-local}"
 RUN_DIR="$OUT_ROOT/$RUN_ID"
@@ -82,17 +85,25 @@ in_env() {
 }
 
 in_env env LAYOUT=gh200 MAX_MODEL_LEN="$MAX_MODEL_LEN" TICK_TRACE_DIR="$TRACE_DIR" PORT="$PORT" \
-  VLLM_OMNI_INPUT_WAIT_TIMEOUT_S="$INPUT_WAIT_TIMEOUT_S" PYTORCH_CUDA_ALLOC_CONF="$ALLOC_CONF" bash benchmarks/duplex_session/serve.sh > "$RUN_DIR/server.log" 2>&1 &
+  VLLM_OMNI_INPUT_WAIT_TIMEOUT_S="$INPUT_WAIT_TIMEOUT_S" PYTORCH_CUDA_ALLOC_CONF="$ALLOC_CONF" \
+  VLLM_OMNI_DUPLEX_DEBUG_LOG_S="$DEBUG_LOG_S" bash benchmarks/duplex_session/serve.sh > "$RUN_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 # Per-process GPU memory every 30 s (host nvidia-smi sees the container's stage processes).
 nvidia-smi --query-compute-apps=timestamp,pid,process_name,used_memory --format=csv -l 30 \
   > "$RUN_DIR/gpu_mem.csv" 2>&1 &
 GPU_MON_PID=$!
-# Host RSS of this user's 8 largest processes every 30 s (Slurm's cgroup OOM
-# killer acts on host RAM; rootless podman-hpc processes are visible here).
+# Host memory every 30 s: RSS of this user's 8 largest processes, plus
+# /dev/shm usage and the job cgroup's total (Slurm's OOM killer acts on the
+# cgroup, which also charges shared memory that no process RSS shows; stages
+# exchange data through shared memory with --ipc host).
+CGROUP_MEM=/sys/fs/cgroup$(awk -F: '$1=="0"{print $3}' /proc/self/cgroup)/memory.current
+[[ -r "$CGROUP_MEM" ]] || CGROUP_MEM=/sys/fs/cgroup/memory$(awk -F: '$2~/memory/{print $3}' /proc/self/cgroup)/memory.usage_in_bytes
 while sleep 30; do
+  ts=$(date +%FT%T)
   ps -u "$USER" -o rss=,pid=,args= --sort=-rss | head -8 \
-    | awk -v ts="$(date +%FT%T)" '{a=$3; for(i=4;i<=NF;i++) a=a" "$i; printf "%s,%d,%s,%s\n", ts, $1/1024, $2, substr(a,1,80)}'
+    | awk -v ts="$ts" '{a=$3; for(i=4;i<=NF;i++) a=a" "$i; printf "%s,%d,%s,%s\n", ts, $1/1024, $2, substr(a,1,80)}'
+  echo "$ts,$(df -m --output=used /dev/shm | tail -1 | tr -d ' '),-,[/dev/shm used]"
+  [[ -r "$CGROUP_MEM" ]] && echo "$ts,$(( $(cat "$CGROUP_MEM") / 1048576 )),-,[job cgroup total]"
 done > "$RUN_DIR/host_mem.csv" 2>&1 &
 HOST_MON_PID=$!
 # Keep the job's exit status: under set -e, the killed server's 143 from `wait` would replace it.
