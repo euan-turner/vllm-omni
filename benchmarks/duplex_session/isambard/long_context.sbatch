@@ -28,6 +28,7 @@
 #   OUT_ROOT       results root (default $REPO/runs/long_context)
 #   INPUT_WAIT_TIMEOUT_S  server stage input-wait timeout (default 0 = off: a
 #                  silent model starves Stage 2 for minutes, which is not a hang)
+#   ALLOC_CONF     server PYTORCH_CUDA_ALLOC_CONF (default expandable_segments:True)
 #   TICK_STALL_S   driver hang detection: abort after this long without a
 #                  Stage-0 tick record (default 120; 0 disables)
 set -euo pipefail
@@ -48,6 +49,10 @@ REF_AUDIO=${REF_AUDIO:?set REF_AUDIO to the MiniCPM-o reference voice wav}
 OUT_ROOT=${OUT_ROOT:-$REPO/runs/long_context}
 PORT=${PORT:-8099}
 INPUT_WAIT_TIMEOUT_S=${INPUT_WAIT_TIMEOUT_S:-0}
+# Stage 0 allocates per-tick temporaries sized by context; with fixed-size
+# segments the caching allocator reserves ~25 GiB extra by 30k tokens and
+# starves Stage 1/2 (allocated stays flat). Expandable segments reuse memory.
+ALLOC_CONF=${ALLOC_CONF:-expandable_segments:True}
 TICK_STALL_S=${TICK_STALL_S:-120}
 
 RUN_ID="$(date +%Y%m%d_%H%M%S)_${MODALITY}_${TARGET_MINUTES}min_s${SESSIONS}_${SLURM_JOB_ID:-local}"
@@ -77,7 +82,7 @@ in_env() {
 }
 
 in_env env LAYOUT=gh200 MAX_MODEL_LEN="$MAX_MODEL_LEN" TICK_TRACE_DIR="$TRACE_DIR" PORT="$PORT" \
-  VLLM_OMNI_INPUT_WAIT_TIMEOUT_S="$INPUT_WAIT_TIMEOUT_S" bash benchmarks/duplex_session/serve.sh > "$RUN_DIR/server.log" 2>&1 &
+  VLLM_OMNI_INPUT_WAIT_TIMEOUT_S="$INPUT_WAIT_TIMEOUT_S" PYTORCH_CUDA_ALLOC_CONF="$ALLOC_CONF" bash benchmarks/duplex_session/serve.sh > "$RUN_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 # Per-process GPU memory every 30 s (host nvidia-smi sees the container's stage processes).
 nvidia-smi --query-compute-apps=timestamp,pid,process_name,used_memory --format=csv -l 30 \
