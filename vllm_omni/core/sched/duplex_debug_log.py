@@ -64,12 +64,31 @@ def rss_bytes() -> int | None:
         return None
 
 
+def host_alloc_stats() -> dict[str, int] | None:
+    """Current bytes held by torch's pinned-host caching allocator, or None if unavailable."""
+    stats_fn = getattr(torch.cuda, "host_memory_stats", None)
+    if stats_fn is None or not torch.cuda.is_available() or not torch.cuda.is_initialized():
+        return None
+    try:
+        stats = stats_fn()
+    except RuntimeError:
+        return None
+    return {key: int(value) for key, value in stats.items() if key.endswith(".current") and "bytes" in key}
+
+
+def top_fields(fields: dict[str, Any], *, n: int = 4, max_depth: int = 10) -> dict[str, dict[str, int]]:
+    """The ``n`` entries of ``fields`` with the largest footprint (host bytes, then scalar items)."""
+    sizes = {name: footprint(value, max_depth=max_depth) for name, value in fields.items()}
+    ranked = sorted(sizes.items(), key=lambda kv: (kv[1]["cpu_bytes"] + 8 * kv[1]["items"]), reverse=True)
+    return {name: size for name, size in ranked[:n] if size["cpu_bytes"] or size["items"] or size["device_bytes"]}
+
+
 def footprint(obj: Any, *, max_depth: int = 6) -> dict[str, int]:
-    """Tensor bytes (host / device), tensor count and scalar items reachable from ``obj``.
+    """Tensor/array bytes (host / device), tensor count and scalar items reachable from ``obj``.
 
     Walks dicts, lists, tuples, sets and plain objects' ``__dict__``; a list of
-    scalars counts as ``items`` without visiting each element. Shared objects
-    are counted once.
+    scalars counts as ``items`` without visiting each element. numpy arrays and
+    bytes count as host bytes. Shared objects are counted once.
     """
     totals = {"cpu_bytes": 0, "device_bytes": 0, "tensors": 0, "items": 0}
     seen: set[int] = set()
@@ -81,6 +100,11 @@ def footprint(obj: Any, *, max_depth: int = 6) -> dict[str, int]:
         if isinstance(value, torch.Tensor):
             key = "cpu_bytes" if value.device.type == "cpu" else "device_bytes"
             totals[key] += value.numel() * value.element_size()
+            totals["tensors"] += 1
+        elif isinstance(value, bytes | bytearray):
+            totals["cpu_bytes"] += len(value)
+        elif hasattr(value, "__array_interface__") and hasattr(value, "nbytes"):
+            totals["cpu_bytes"] += int(value.nbytes)
             totals["tensors"] += 1
         elif isinstance(value, dict):
             for item in value.values():

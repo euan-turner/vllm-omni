@@ -81,6 +81,7 @@ for line in lines:
     if m:
         by[m.group(2)].append((m.group(1), json.loads(m.group(3))))
 gb = lambda b: "-" if b is None else f"{b / 2**30:.1f}G"
+pin = lambda f: "pinned " + "/".join(gb(v) for v in (f.get("pinned") or {}).values()) if f.get("pinned") else ""
 mb = lambda b: f"{b / 2**20:.0f}M"
 for name, rows in sorted(by.items()):
     print(f"-- {name} ({len(rows)} lines)")
@@ -90,11 +91,13 @@ for name, rows in sorted(by.items()):
         elif name.endswith("-talker-state"):
             parts = [f"{k.strip('_')}={v['entries']}/{mb(v['cpu_bytes'])}/{mb(v['device_bytes'])}/{v['items']}"
                      for k, v in f.items() if isinstance(v, dict)]
-            print(ts, "rss", gb(f.get("rss_bytes")), " ".join(parts))
+            print(ts, "rss", gb(f.get("rss_bytes")), pin(f), " ".join(parts))
         else:
-            reqs = " ".join(f"[{r['num_prompt_tokens']}p {r['num_output_tokens']}o cpu={mb(r['cpu_bytes'])} "
-                            f"items={r['items']}]" for r in f.get("running", []))
-            print(ts, "rss", gb(f.get("rss_bytes")), "waiting", f.get("waiting"), reqs)
+            reqs = " ".join(
+                f"[{r['num_prompt_tokens']}p {r['num_output_tokens']}o cpu={mb(r['cpu_bytes'])} items={r['items']} top: "
+                + ", ".join(f"{k}={mb(v['cpu_bytes'])}/{v['items']}" for k, v in (r.get("top") or {}).items()) + "]"
+                for r in f.get("running", []))
+            print(ts, "rss", gb(f.get("rss_bytes")), pin(f), "waiting", f.get("waiting"), reqs)
 EOF
 
 echo "== stage timings per response (11 evenly spaced)"
