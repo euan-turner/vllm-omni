@@ -33,7 +33,7 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.logits_processor import LogitsContext, LogitsProcessor
 
-from vllm_omni.core.sched.duplex_debug_log import PeriodicDebugLog, footprint, rss_bytes
+from vllm_omni.core.sched.duplex_debug_log import PeriodicDebugLog, footprint, host_alloc_stats, rss_bytes
 from vllm_omni.engine.duplex.intermediate import get_tts_handoff
 from vllm_omni.model_executor.models.minicpmo_4_5 import (
     MINICPMO45_DUPLEX_CODEC_TOKENS_PER_CHUNK,
@@ -2167,7 +2167,7 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
             debug = self._duplex_debug_log = PeriodicDebugLog("stage1-talker-state")
         if not debug.due():
             return
-        fields: dict[str, Any] = {"rss_bytes": rss_bytes()}
+        fields: dict[str, Any] = {"rss_bytes": rss_bytes(), "pinned": host_alloc_stats()}
         for name in (
             "_decode_codec_ids",
             "_request_audio_states",

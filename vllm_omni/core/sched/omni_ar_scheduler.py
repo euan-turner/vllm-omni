@@ -23,7 +23,13 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
-from vllm_omni.core.sched.duplex_debug_log import PeriodicDebugLog, footprint, rss_bytes
+from vllm_omni.core.sched.duplex_debug_log import (
+    PeriodicDebugLog,
+    footprint,
+    host_alloc_stats,
+    rss_bytes,
+    top_fields,
+)
 from vllm_omni.core.sched.duplex_tick_trace import DuplexTickTracer
 from vllm_omni.core.sched.fast_allocate import install_decode_allocate_fast_path
 from vllm_omni.core.sched.omni_scheduler_mixin import OmniSchedulerMixin
@@ -801,13 +807,15 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
             debug.emit(
                 {
                     "rss_bytes": rss_bytes(),
+                    "pinned": host_alloc_stats(),
                     "running": [
                         {
                             "request_id": request.request_id[-24:],
                             "num_prompt_tokens": request.num_prompt_tokens,
                             "num_computed_tokens": request.num_computed_tokens,
                             "num_output_tokens": request.num_output_tokens,
-                            **footprint(vars(request)),
+                            **footprint(vars(request), max_depth=10),
+                            "top": top_fields(vars(request)),
                         }
                         for request in self.running
                     ],

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm_omni.core.sched.duplex_debug_log import DEBUG_LOG_ENV, PeriodicDebugLog, footprint, rss_bytes
+from vllm_omni.core.sched.duplex_debug_log import DEBUG_LOG_ENV, PeriodicDebugLog, footprint, rss_bytes, top_fields
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -40,6 +40,17 @@ def test_footprint_counts_tensors_once_and_scalar_lists_as_items() -> None:
     shared = torch.zeros(4, dtype=torch.float32)
     state = {"a": {"t": shared, "again": shared}, "hist": [1, 2, 3], "obj": SimpleNamespace(t=torch.zeros(2))}
     assert footprint(state) == {"cpu_bytes": 16 + 8, "device_bytes": 0, "tensors": 2, "items": 3}
+
+
+def test_footprint_counts_numpy_and_bytes_as_host_bytes() -> None:
+    import numpy as np
+
+    assert footprint({"a": np.zeros(10, dtype=np.float32), "b": b"xyz"})["cpu_bytes"] == 40 + 3
+
+
+def test_top_fields_ranks_by_host_bytes_and_items() -> None:
+    fields = {"small": [1], "big": torch.zeros(100), "many": list(range(50)), "empty": None}
+    assert list(top_fields(fields, n=2)) == ["big", "many"]
 
 
 def test_rss_bytes_is_positive_on_linux() -> None:

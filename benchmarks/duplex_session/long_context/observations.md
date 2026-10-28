@@ -36,16 +36,26 @@ is kept only to observe degenerate behaviour past the limit.
   prompts that elicit longer answers, or by measuring speak cost at fixed
   context depths.
 
-## 3. Sessions degenerate inside the context length
+## 3. Sessions lock into an open turn inside the context length
 
-- **Behaviour:** ticks become runs of `<|tts_bos|>` (no text), usually hitting
-  the 20-token cap. In audio the switch is abrupt at ~38.9k tokens and every
-  later tick is degenerate (no listen ticks return). AV shows isolated
-  degenerate ticks from ~16k and switches fully at ~45k.
-- **Onset is the main result.** Audio degenerates before the 40960 limit, so
-  extending context artificially is pointless: the model degenerates anyway.
-  The onset gives a target for context compaction/compression, or at least an
-  upper watermark by which compaction must trigger.
+- **Behaviour:** after a long listening stretch the model emits a single
+  `<|speak|>` (opening a turn) and then keeps sampling `<|listen|>` without ever
+  emitting `<|turn_eos|>`. Because the turn is open, the host sampling policy
+  rewrites each `<|listen|>` to `<|tts_bos|>` and decoding continues
+  ([`minicpmo_4_5_omni.py`](../../../vllm_omni/model_executor/models/minicpmo_4_5/minicpmo_4_5_omni.py),
+  `_finalize_minicpmo45_native_duplex_sample`), so ticks become text-free runs
+  of `<|tts_bos|>` at the 20-token cap ("degenerate" ticks in the metrics).
+  Confirmed by a sampler counter: every `<|tts_bos|>` in these runs was a
+  rewritten `<|listen|>`; the model never sampled `<|tts_bos|>` itself.
+- **Onset:** ~38.9k tokens in both audio (`7793458`) and AV capped at 40960
+  (`7798235`); ~41–45k in AV runs with the extended RoPE. In audio the lock-in
+  never ended; in one extended AV run (`7798408`) the model closed the turn at
+  ~64.7k and listen ticks returned.
+- **Onset is the main result.** The lock-in starts before the 40960 limit, so
+  extending context artificially is pointless. The onset gives a target for
+  context compaction/compression, or at least an upper watermark by which
+  compaction must trigger. The turn-taking policy is a second lever: it
+  converts a model that wants to listen into forced speech.
 - **Cost:** a degenerate tick costs 0.22–0.30 s (3–4× a listen tick at the
   same context), and ~85% are followed by a server-inserted silence
   continuation unit, so Stage 0 runs ~2 updates per second of input.
@@ -62,9 +72,12 @@ is kept only to observe degenerate behaviour past the limit.
 
 ## Open issues, not results
 
-- **Host-RAM OOM** ends every long session (Stage 1 is killed first; AV
-  ~3–4× sooner than audio). Cause unknown; the sampler now records per-process
-  RSS, `/dev/shm` and the job total (`host_mem.csv`).
+- **Host-RAM OOM** ends every long session that reaches the lock-in: Stage 1's
+  RSS grows ~1.5 GB per 10 min in normal operation and ~9 GB per 30 s during
+  the lock-in, until Slurm kills it at the ~115 GB job limit. The growth is not
+  in the Talker model's per-request state. The only Python-visible data that
+  grows with it is a scalar list reachable from Stage 1's request (~30M items),
+  too small on its own to explain ~90 GB; the source is still unidentified.
 - **GPU memory** was a measurement artefact, now fixed: Stage 0's caching
   allocator reserved ~25 GiB of context-sized temporaries by 30k tokens
   (allocated stayed flat at ~45.5 GiB); `expandable_segments:True` keeps
