@@ -6,9 +6,10 @@
 #
 # Stage-0 max_model_len is set by serve.sh (MAX_MODEL_LEN, default 131072).
 # Values above the HF limit (40960) are an explicit context overflow: serve.sh
-# exports VLLM_ALLOW_LONG_MAX_MODEL_LEN=1, positions past 40960 are
-# extrapolated, and model quality there is not meaningful. Use it for systems
-# measurements only.
+# exports VLLM_ALLOW_LONG_MAX_MODEL_LEN=1, and Stage 0's max_position_embeddings
+# is raised to 131072 below so the RoPE table covers those positions (same
+# rope_theta, no scaling: plain extrapolation). Model quality past 40960 is not
+# meaningful. Use it for systems measurements only.
 base_config: ../../../vllm_omni/deploy/minicpmo_4_5_duplex_h200.yaml
 
 duplex_session:
@@ -20,9 +21,24 @@ stages:
     # ~145 KiB/token: 4 x 131072 tokens is ~73 GiB, which does not fit next to
     # Talker and Code2Wav. vLLM only requires one full-length request (~18 GiB);
     # with concurrent long sessions, preemption or overflow shows up in the tick
-    # trace. 0.5 of the ~95 GiB CUDA sees leaves headroom for Stage 1's
-    # unbudgeted growth over long sessions (CUDA OOM at 0.6, job 7766599).
+    # trace. 0.5 of the ~95 GiB CUDA sees leaves headroom outside the budgets:
+    # Stage 0's caching allocator reserves ~25 GiB beyond its budget by 30k
+    # tokens (allocated stays flat), which starved Stage 1 at 0.6 (job 7766599);
+    # the sbatch also sets expandable_segments for this.
     gpu_memory_utilization: 0.5
+    # hf_overrides is replaced, not merged, by an overlay: the first six keys
+    # repeat the H200 profile's Stage 0 flags. Without max_position_embeddings,
+    # vLLM sizes the RoPE cos/sin table at the HF 40960 and the first position
+    # past it faults on the GPU (job 7790433, CUBLAS_STATUS_EXECUTION_FAILED).
+    # serve.sh rejects MAX_MODEL_LEN above this value.
+    hf_overrides:
+      duplex_incremental_fbank: true
+      vision_fused_layers: true
+      vision_cuda_graph: true
+      duplex_audio_encoder_cuda_graph: true
+      duplex_audio_encoder_cuda_graph_batch_sizes_from_sessions: true
+      duplex_audio_encoder_pinned_h2d: true
+      max_position_embeddings: 131072
   - stage_id: 1
     max_num_seqs: 4
   - stage_id: 2

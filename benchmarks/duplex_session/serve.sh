@@ -42,6 +42,8 @@ case "$LAYOUT" in
   gh200)
     DEPLOY="$REPO_ROOT/benchmarks/duplex_session/deploy/minicpmo_4_5_gh200_long_context.yaml"
     MAX_MODEL_LEN=${MAX_MODEL_LEN:-131072}
+    # Stage-0 max_position_embeddings in that deploy file (RoPE table size).
+    MAX_POSITIONS=131072
     ;;
   *) echo "LAYOUT must be 1gpu, 2gpu or gh200, got '$LAYOUT'" >&2; exit 2 ;;
 esac
@@ -50,6 +52,10 @@ MAX_MODEL_LEN=${MAX_MODEL_LEN:-}
 if [[ -n "$MAX_MODEL_LEN" ]]; then
   if ! [[ "$MAX_MODEL_LEN" =~ ^[1-9][0-9]*$ ]]; then
     echo "MAX_MODEL_LEN must be a positive integer, got '$MAX_MODEL_LEN'" >&2
+    exit 2
+  fi
+  if [[ -n "${MAX_POSITIONS:-}" ]] && (( MAX_MODEL_LEN > MAX_POSITIONS )); then
+    echo "MAX_MODEL_LEN=$MAX_MODEL_LEN exceeds the deploy file's max_position_embeddings ($MAX_POSITIONS)" >&2
     exit 2
   fi
   if (( MAX_MODEL_LEN > HF_MAX_MODEL_LEN )); then

@@ -203,6 +203,24 @@ def test_max_model_len_within_hf_limit_merges_with_profiler_overrides() -> None:
     assert "VLLM_ALLOW_LONG_MAX_MODEL_LEN=1" not in _dry_run_env(**env)
 
 
+def test_gh200_overlay_extends_rope_and_keeps_h200_stage0_flags() -> None:
+    import yaml
+
+    def stage0(path: Path) -> dict:
+        return next(s for s in yaml.safe_load(path.read_text())["stages"] if s["stage_id"] == 0)
+
+    overlay = stage0(DEPLOY_DIR / "minicpmo_4_5_gh200_long_context.yaml")["hf_overrides"]
+    h200 = stage0(REPO_ROOT / "vllm_omni/deploy/minicpmo_4_5_duplex_h200.yaml")["hf_overrides"]
+    assert {k: overlay[k] for k in h200} == h200
+    assert overlay["max_position_embeddings"] == 131072
+
+
+def test_gh200_max_model_len_above_rope_table_is_rejected() -> None:
+    result = _dry_run(LAYOUT="gh200", MAX_MODEL_LEN="131073")
+    assert result.returncode == 2
+    assert "max_position_embeddings" in result.stderr
+
+
 @pytest.mark.parametrize("value", ["0", "abc", "-5"])
 def test_invalid_max_model_len_is_rejected(value: str) -> None:
     result = _dry_run(LAYOUT="gh200", MAX_MODEL_LEN=value)
