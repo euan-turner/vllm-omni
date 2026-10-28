@@ -17,9 +17,13 @@ quality drops with depth in a long stream. Model: one GH200 on Isambard-AI.
 | [`../isambard/`](../isambard/) | Containerfile, arm64 availability check, sbatch job |
 
 `serve.sh LAYOUT=gh200` sets Stage-0 `max_model_len` to `MAX_MODEL_LEN`
-(default and maximum 40960, the HF limit). A session that outgrows it ends
-with `context_length_exceeded`, and its tick record has `status: overflow`.
-Context past 40960 was tried and dropped; see [observations](observations.md).
+(default 131072). Above the HF limit of 40960 it exports
+`VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` and the deploy file extends the RoPE table
+(plain extrapolation). This is kept only to observe degenerate behaviour past
+the limit; extending context is not a goal (see [observations](observations.md)),
+and latency or quality results past 40960 should not be quoted. A session that
+outgrows `max_model_len` ends with `context_length_exceeded`, and its tick
+record has `status: overflow`.
 
 At 1 fps an audio+video unit adds about 78 tokens and an audio-only unit about
 12 (plus generated tokens), so 40960 tokens is about 8.5 min AV or 50 min audio.

@@ -182,27 +182,41 @@ def _dry_run_env(**env: str) -> str:
     return result.stderr
 
 
-def test_gh200_layout_uses_hf_context_limit() -> None:
+def test_gh200_layout_overflows_hf_context_explicitly() -> None:
     env = {"LAYOUT": "gh200", "TICK_TRACE_DIR": "/tmp/ticks"}
     argv = _argv(**env)
     deploy = DEPLOY_DIR / "minicpmo_4_5_gh200_long_context.yaml"
     assert _flag(argv, "--deploy-config") == str(deploy)
     assert deploy.is_file()
-    assert json.loads(_flag(argv, "--stage-overrides")) == {"0": {"max_model_len": 40960}}
-    assert "VLLM_OMNI_DUPLEX_TICK_TRACE_DIR=/tmp/ticks" in _dry_run_env(**env)
+    assert json.loads(_flag(argv, "--stage-overrides")) == {"0": {"max_model_len": 131072}}
+    stderr = _dry_run_env(**env)
+    assert "VLLM_ALLOW_LONG_MAX_MODEL_LEN=1" in stderr
+    assert "VLLM_OMNI_DUPLEX_TICK_TRACE_DIR=/tmp/ticks" in stderr
 
 
-def test_max_model_len_merges_with_profiler_overrides() -> None:
-    env = {"LAYOUT": "gh200", "MAX_MODEL_LEN": "32768", "PROFILE": "torch", "PROFILE_STAGES": "0,1"}
+def test_max_model_len_within_hf_limit_merges_with_profiler_overrides() -> None:
+    env = {"LAYOUT": "gh200", "MAX_MODEL_LEN": "40960", "PROFILE": "torch", "PROFILE_STAGES": "0,1"}
     overrides = json.loads(_flag(_argv(**env), "--stage-overrides"))
-    assert overrides["0"]["max_model_len"] == 32768
+    assert overrides["0"]["max_model_len"] == 40960
     assert "profiler_config" in overrides["0"] and "profiler_config" in overrides["1"]
     assert "max_model_len" not in overrides["1"]
+    assert "VLLM_ALLOW_LONG_MAX_MODEL_LEN=1" not in _dry_run_env(**env)
 
 
-@pytest.mark.parametrize("layout", ["gh200", "2gpu"])
-def test_max_model_len_above_hf_limit_is_rejected(layout: str) -> None:
-    result = _dry_run(LAYOUT=layout, MAX_MODEL_LEN="40961")
+def test_gh200_overlay_extends_rope_and_keeps_h200_stage0_flags() -> None:
+    import yaml
+
+    def stage0(path: Path) -> dict:
+        return next(s for s in yaml.safe_load(path.read_text())["stages"] if s["stage_id"] == 0)
+
+    overlay = stage0(DEPLOY_DIR / "minicpmo_4_5_gh200_long_context.yaml")["hf_overrides"]
+    h200 = stage0(REPO_ROOT / "vllm_omni/deploy/minicpmo_4_5_duplex_h200.yaml")["hf_overrides"]
+    assert {k: overlay[k] for k in h200} == h200
+    assert overlay["max_position_embeddings"] == 131072
+
+
+def test_gh200_max_model_len_above_rope_table_is_rejected() -> None:
+    result = _dry_run(LAYOUT="gh200", MAX_MODEL_LEN="131073")
     assert result.returncode == 2
     assert "max_position_embeddings" in result.stderr
 

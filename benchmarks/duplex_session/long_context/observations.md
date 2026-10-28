@@ -11,7 +11,8 @@ streamed in real time at 1 unit/s. Metric definitions are in
 | `7793983` | audio + video, 1 fps | 75.2k tokens, ~15 min | host-RAM OOM kill (Stage 1, 2) |
 
 Context past the HF limit of 40960 was reached by extending the RoPE table
-(plain extrapolation). That extension has been reverted (see 3).
+(plain extrapolation). Extending context is not a goal (see 3); the extension
+is kept only to observe degenerate behaviour past the limit.
 
 ## 1. Listen ticks leave latency slack within the context length
 

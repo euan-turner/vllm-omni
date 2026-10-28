@@ -22,7 +22,7 @@
 #   MODALITY       av | audio (default av)
 #   TARGET_MINUTES stream length (default 30 for av, 120 for audio)
 #   SESSIONS       concurrent long sessions (default 1)
-#   MAX_MODEL_LEN  Stage-0 context (default and maximum 40960, the HF limit)
+#   MAX_MODEL_LEN  Stage-0 context (default 131072; >40960 extends RoPE: diagnostics only)
 #   DATASET        local Omni-DuplexEval mirror (default $HF_HOME/omni_duplex_eval)
 #   REF_AUDIO      MiniCPM-o reference voice wav (required)
 #   OUT_ROOT       results root (default $REPO/runs/long_context)
@@ -45,7 +45,7 @@ VENV=${VENV:-$REPO/.venv}
 MODALITY=${MODALITY:-av}
 if [[ "$MODALITY" == av ]]; then TARGET_MINUTES=${TARGET_MINUTES:-30}; else TARGET_MINUTES=${TARGET_MINUTES:-120}; fi
 SESSIONS=${SESSIONS:-1}
-MAX_MODEL_LEN=${MAX_MODEL_LEN:-40960}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-131072}
 DATASET=${DATASET:-$HF_HOME/omni_duplex_eval}
 REF_AUDIO=${REF_AUDIO:?set REF_AUDIO to the MiniCPM-o reference voice wav}
 OUT_ROOT=${OUT_ROOT:-$REPO/runs/long_context}

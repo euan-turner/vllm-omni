@@ -9,8 +9,8 @@
 #
 # Environment:
 #   LAYOUT          1gpu | 2gpu | gh200 (default 2gpu)
-#   MAX_MODEL_LEN   Stage-0 max_model_len override (gh200 default 40960); at most
-#                   the HF limit 40960 (RoPE table size; past it vLLM faults)
+#   MAX_MODEL_LEN   Stage-0 max_model_len override (gh200 default 131072). Above
+#                   the HF limit (40960) it exports VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 #   TICK_TRACE_DIR  writes Stage-0 per-tick JSONL records there (default off)
 #   PROFILE         off | torch | cuda (default off)
 #   PROFILE_STAGES  comma-separated stage ids given profiler_config (default 0)
@@ -41,7 +41,9 @@ case "$LAYOUT" in
   2gpu) DEPLOY="$REPO_ROOT/benchmarks/duplex_session/deploy/minicpmo_4_5_2gpu_32gb.yaml" ;;
   gh200)
     DEPLOY="$REPO_ROOT/benchmarks/duplex_session/deploy/minicpmo_4_5_gh200_long_context.yaml"
-    MAX_MODEL_LEN=${MAX_MODEL_LEN:-$HF_MAX_MODEL_LEN}
+    MAX_MODEL_LEN=${MAX_MODEL_LEN:-131072}
+    # Stage-0 max_position_embeddings in that deploy file (RoPE table size).
+    MAX_POSITIONS=131072
     ;;
   *) echo "LAYOUT must be 1gpu, 2gpu or gh200, got '$LAYOUT'" >&2; exit 2 ;;
 esac
@@ -52,9 +54,12 @@ if [[ -n "$MAX_MODEL_LEN" ]]; then
     echo "MAX_MODEL_LEN must be a positive integer, got '$MAX_MODEL_LEN'" >&2
     exit 2
   fi
-  if (( MAX_MODEL_LEN > HF_MAX_MODEL_LEN )); then
-    echo "MAX_MODEL_LEN=$MAX_MODEL_LEN exceeds the model's $HF_MAX_MODEL_LEN positions (max_position_embeddings)" >&2
+  if [[ -n "${MAX_POSITIONS:-}" ]] && (( MAX_MODEL_LEN > MAX_POSITIONS )); then
+    echo "MAX_MODEL_LEN=$MAX_MODEL_LEN exceeds the deploy file's max_position_embeddings ($MAX_POSITIONS)" >&2
     exit 2
+  fi
+  if (( MAX_MODEL_LEN > HF_MAX_MODEL_LEN )); then
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
   fi
 fi
 
@@ -121,7 +126,7 @@ if [[ "$PROFILE" == cuda ]]; then
 fi
 
 if [[ "${DRY_RUN:-0}" == 1 ]]; then
-  echo "env: VLLM_OMNI_DUPLEX_TICK_TRACE_DIR=${VLLM_OMNI_DUPLEX_TICK_TRACE_DIR:-}" >&2
+  echo "env: VLLM_ALLOW_LONG_MAX_MODEL_LEN=${VLLM_ALLOW_LONG_MAX_MODEL_LEN:-} VLLM_OMNI_DUPLEX_TICK_TRACE_DIR=${VLLM_OMNI_DUPLEX_TICK_TRACE_DIR:-}" >&2
   printf '%q ' "${CMD[@]}"
   echo
   exit 0
