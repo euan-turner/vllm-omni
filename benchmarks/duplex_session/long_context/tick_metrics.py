@@ -25,8 +25,13 @@ Definitions (all times in seconds, ``time.monotonic`` in the EngineCore):
   the previous tick of the same session).
 - **latency_s** = ``t_end - t_arrival``.
 - **kind**: ``listen`` when the tick sampled exactly one token and it is the
-  listen token (any single token when the listen id is unknown); otherwise
-  ``speak``.
+  listen token (any single token when the listen id is unknown);
+  ``degenerate`` when at least ``DEGENERATE_MIN_REPEATS`` (3) of the sampled
+  tokens, and at least ``DEGENERATE_MIN_FRACTION`` (half) of them, are
+  ``<|tts_bos|>`` (only when its id is known); otherwise ``speak``. Degenerate
+  ticks are the repeated-``<|tts_bos|>`` runs seen past ~15-25k tokens, which
+  produce no text and usually hit the 20-token cap; they are separated so the
+  ``speak`` profile measures normal speech.
 - **Tick deadline**: ``TICK_DEADLINE_S`` = 1.0, the input unit period. A tick
   misses it when ``service_s > TICK_DEADLINE_S``; ticks are serial within a
   session, so sustained misses grow the input backlog without bound.
@@ -56,6 +61,9 @@ from typing import Any
 TICK_DEADLINE_S = 1.0
 UNIT_S = 1.0
 CONTINUATION_GAP_S = 0.5 * UNIT_S
+DEGENERATE_MIN_REPEATS = 3
+DEGENERATE_MIN_FRACTION = 0.5
+TICK_KINDS = ("listen", "speak", "degenerate")
 
 
 @dataclass(frozen=True)
@@ -90,13 +98,21 @@ def read_records(paths: Iterable[str | Path]) -> list[dict[str, Any]]:
     return records
 
 
-def tick_kind(sampled_token_ids: Sequence[int], listen_token_id: int | None) -> str:
+def tick_kind(
+    sampled_token_ids: Sequence[int], listen_token_id: int | None, tts_bos_token_id: int | None = None
+) -> str:
     if len(sampled_token_ids) == 1 and (listen_token_id is None or sampled_token_ids[0] == listen_token_id):
         return "listen"
+    if tts_bos_token_id is not None:
+        repeats = sum(token == tts_bos_token_id for token in sampled_token_ids)
+        if repeats >= DEGENERATE_MIN_REPEATS and repeats >= DEGENERATE_MIN_FRACTION * len(sampled_token_ids):
+            return "degenerate"
     return "speak"
 
 
-def compute_ticks(records: Iterable[dict[str, Any]], *, listen_token_id: int | None = None) -> list[Tick]:
+def compute_ticks(
+    records: Iterable[dict[str, Any]], *, listen_token_id: int | None = None, tts_bos_token_id: int | None = None
+) -> list[Tick]:
     """Complete ticks in (request, tick_index) order; incomplete or overflowed records are skipped."""
     complete = [
         record
@@ -121,7 +137,7 @@ def compute_ticks(records: Iterable[dict[str, Any]], *, listen_token_id: int | N
             Tick(
                 request_id=rid,
                 tick_index=index,
-                kind=tick_kind(sampled, listen_token_id),
+                kind=tick_kind(sampled, listen_token_id, tts_bos_token_id),
                 context_tokens=int(record.get("context_tokens_before") or 0) + int(record.get("prefill_tokens") or 0),
                 prefill_tokens=int(record.get("prefill_tokens") or 0),
                 num_sampled_tokens=len(sampled),

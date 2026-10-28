@@ -88,8 +88,15 @@ SERVER_PID=$!
 nvidia-smi --query-compute-apps=timestamp,pid,process_name,used_memory --format=csv -l 30 \
   > "$RUN_DIR/gpu_mem.csv" 2>&1 &
 GPU_MON_PID=$!
+# Host RSS of this user's 8 largest processes every 30 s (Slurm's cgroup OOM
+# killer acts on host RAM; rootless podman-hpc processes are visible here).
+while sleep 30; do
+  ps -u "$USER" -o rss=,pid=,args= --sort=-rss | head -8 \
+    | awk -v ts="$(date +%FT%T)" '{a=$3; for(i=4;i<=NF;i++) a=a" "$i; printf "%s,%d,%s,%s\n", ts, $1/1024, $2, substr(a,1,80)}'
+done > "$RUN_DIR/host_mem.csv" 2>&1 &
+HOST_MON_PID=$!
 # Keep the job's exit status: under set -e, the killed server's 143 from `wait` would replace it.
-trap 'rc=$?; kill $GPU_MON_PID $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null || true; exit $rc' EXIT
+trap 'rc=$?; kill $GPU_MON_PID $HOST_MON_PID $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null || true; exit $rc' EXIT
 
 for _ in $(seq 1 180); do
   curl -sf "localhost:$PORT/health" >/dev/null && break

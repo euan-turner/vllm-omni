@@ -124,6 +124,19 @@ def test_update_arriving_within_half_a_unit_is_a_suspected_continuation() -> Non
     assert row["suspected_continuations"] == 2 and math.isclose(row["queue_p99_s"], 0.01)
 
 
+def test_repeated_tts_bos_ticks_are_degenerate_not_speak() -> None:
+    bos, listen = 9, 1
+    kind = tick_metrics.tick_kind
+    assert kind([bos] * 20, listen, bos) == "degenerate"
+    assert kind([2, bos, bos, bos, 3, listen], listen, bos) == "degenerate"
+    assert kind([bos, bos, 4, 5], listen, bos) == "speak"
+    assert kind([bos, bos, bos, 4, 5, 6, 7], listen, bos) == "speak"
+    assert kind([bos] * 20, listen, None) == "speak"
+    assert kind([listen], listen, bos) == "listen"
+    records = [_record("r", 0, t0=0.0, context=100, service=0.2, sampled=[bos] * 20)]
+    assert tick_metrics.compute_ticks(records, listen_token_id=listen, tts_bos_token_id=bos)[0].kind == "degenerate"
+
+
 def test_summaries_skip_first_tick_and_fit_slope() -> None:
     records = [_record("r", 0, t0=0.0, context=100, service=5.0, sampled=[1])]
     records += [

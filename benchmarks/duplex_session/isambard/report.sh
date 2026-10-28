@@ -63,6 +63,11 @@ awk -F', ' 'NR>1 && $4 ~ /MiB/ {m=$4+0; p=$2; if(!(p in f)){f[p]=m; t0[p]=$1}; l
   END{for(p in f) printf "pid %s  first %d  last %d  max %d  (%s -> %s)\n", p, f[p], l[p], x[p], t0[p], t1[p]}' \
   "$RUN/gpu_mem.csv" 2>/dev/null
 
+echo "== host RSS per process (MiB): first, last, max"
+awk -F, '{k=$3" "$4; if(!(k in f)){f[k]=$2; t0[k]=$1}; l[k]=$2; t1[k]=$1; if($2>x[k])x[k]=$2}
+  END{for(k in f) if(x[k]>=1024) printf "%7d %7d %7d  %s  (%s -> %s)\n", f[k], l[k], x[k], k, t0[k], t1[k]}' \
+  "$RUN/host_mem.csv" 2>/dev/null | sort -k3 -nr | head -10
+
 echo "== stage timings per response (11 evenly spaced)"
 grep -o 'OmniTiming.*' "$RUN/server.log" 2>/dev/null \
   | sed -E 's/.*total=([0-9.]+s).*stages=\[([^]]*)\].*/total=\1 stages=\2/' \

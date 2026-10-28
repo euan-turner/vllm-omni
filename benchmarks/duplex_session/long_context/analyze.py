@@ -17,7 +17,7 @@ sessions, other clients) are dropped. Tick ``k`` of a session is input unit
 ``k``, i.e. stream media time ``[k, k+1)`` s.
 
 External dependencies: stdlib; matplotlib (optional, plots); transformers
-(optional, ``--model`` to resolve the listen token id).
+(optional, ``--model`` to resolve the listen and tts_bos token ids).
 
 Usage:
     python benchmarks/duplex_session/long_context/analyze.py RUN_DIR --tick-trace-dir TRACE_DIR \\
@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tick_metrics import (  # noqa: E402
     TICK_DEADLINE_S,
+    TICK_KINDS,
     Tick,
     compute_ticks,
     linear_fit,
@@ -79,16 +80,19 @@ def segment_at(segments: list[dict[str, Any]], media_s: float) -> dict[str, Any]
     return None
 
 
-def resolve_listen_token_id(model: str | None, explicit: int | None) -> int | None:
-    if explicit is not None:
-        return explicit
-    if not model:
-        return None
+def resolve_token_ids(model: str | None, tokens: dict[str, int | None]) -> dict[str, int | None]:
+    """Token -> id; explicit ids win, the rest come from ``model``'s tokenizer (None when unresolved)."""
+    resolved = dict(tokens)
+    missing = [token for token, token_id in tokens.items() if token_id is None]
+    if not model or not missing:
+        return resolved
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
-    token_id = tokenizer.convert_tokens_to_ids("<|listen|>")
-    return int(token_id) if isinstance(token_id, int) and token_id != tokenizer.unk_token_id else None
+    for token in missing:
+        token_id = tokenizer.convert_tokens_to_ids(token)
+        resolved[token] = int(token_id) if isinstance(token_id, int) and token_id != tokenizer.unk_token_id else None
+    return resolved
 
 
 def segment_score(score: dict[str, Any]) -> dict[str, float]:
@@ -144,7 +148,7 @@ def plot(out_dir: Path, ticks: list[Tick], tick_rows: list[dict[str, Any]], qual
         print("matplotlib not installed; skipping plots", file=sys.stderr)
         return
     steady = [tick for tick in ticks if tick.tick_index > 0]
-    colors = {"listen": "#4C78A8", "speak": "#F58518"}
+    colors = {"listen": "#4C78A8", "speak": "#F58518", "degenerate": "#8C8C8C"}
 
     fig, ax = plt.subplots(figsize=(8, 5))
     for kind, color in colors.items():
@@ -228,8 +232,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--tick-trace-dir", type=Path, help="defaults to run.json tick_trace_dir")
-    parser.add_argument("--model", help="tokenizer to resolve <|listen|>; otherwise any 1-token tick is listen")
+    parser.add_argument(
+        "--model",
+        help="tokenizer to resolve <|listen|> and <|tts_bos|>; otherwise any 1-token tick is listen "
+        "and no tick is degenerate",
+    )
     parser.add_argument("--listen-token-id", type=int)
+    parser.add_argument("--tts-bos-token-id", type=int)
     parser.add_argument("--baseline-score-root", type=Path, help="depth-0 omni-duplex-eval scores for the split")
     parser.add_argument("--bin-tokens", type=int, default=2048)
     args = parser.parse_args(argv)
@@ -242,7 +251,10 @@ def main(argv: list[str] | None = None) -> int:
     sessions = load_sessions(args.run_dir)
     owner = match_requests_to_sessions(records, sessions)
     records = [record for record in records if record["request_id"] in owner]
-    ticks = compute_ticks(records, listen_token_id=resolve_listen_token_id(args.model, args.listen_token_id))
+    token_ids = resolve_token_ids(
+        args.model, {"<|listen|>": args.listen_token_id, "<|tts_bos|>": args.tts_bos_token_id}
+    )
+    ticks = compute_ticks(records, listen_token_id=token_ids["<|listen|>"], tts_bos_token_id=token_ids["<|tts_bos|>"])
 
     by_index = {session["session_index"]: session for session in sessions}
     tick_rows = []
@@ -275,7 +287,8 @@ def main(argv: list[str] | None = None) -> int:
         "queue_p99_s": percentile([t.queue_s for t in steady], 0.99) if steady else None,
         "suspected_continuation_ticks": sum(t.suspected_continuation for t in ticks),
         "by_context": summarize_by_context(ticks, bin_tokens=args.bin_tokens),
-        "linear_fit": {kind: linear_fit(ticks, kind=kind) for kind in ("listen", "speak")},
+        "ticks_by_kind": {kind: sum(t.kind == kind for t in ticks) for kind in TICK_KINDS},
+        "linear_fit": {kind: linear_fit(ticks, kind=kind) for kind in TICK_KINDS},
         "quality": {
             "scored_segments": len(quality),
             "content_score_mean": statistics.fmean(r["content_score"] for r in quality) if quality else None,
