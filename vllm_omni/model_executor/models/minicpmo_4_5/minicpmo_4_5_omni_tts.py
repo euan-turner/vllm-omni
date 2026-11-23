@@ -38,6 +38,7 @@ from vllm_omni.model_executor.models.minicpmo_4_5 import (
     MINICPMO45_DUPLEX_CODEC_TOKENS_PER_CHUNK,
     MINICPMO45_DUPLEX_TURN_END_CODEC_TOKENS,
 )
+from vllm_omni.model_executor.models.minicpmo_4_5.pipeline import _CODEC_EOS_TOKEN_ID
 from vllm_omni.model_executor.models.minicpmo_4_5.talker_codec_sample import (
     HISTORY_WINDOW,
     TalkerCodecDeviceState,
@@ -636,7 +637,7 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
             self._tts_bos_id = getattr(tts_config, "audio_bos_token_id", 151687)
             self._text_eos_id = getattr(tts_config, "text_eos_token_id", 151692)
             self._num_audio_tokens = getattr(tts_config, "num_audio_tokens", 6562)
-            self._codec_eos_id = int(getattr(tts_config, "eos_token_id", self._num_audio_tokens - 1))
+            self._codec_eos_id = _CODEC_EOS_TOKEN_ID
             self._hidden_size = getattr(tts_config, "hidden_size", 768)
             self._normalize = getattr(tts_config, "normalize_projected_hidden", True)
             # Codec sampling knobs: the deploy YAML's codec_sampling_params
