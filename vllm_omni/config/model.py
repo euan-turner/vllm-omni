@@ -75,6 +75,14 @@ class OmniModelArchConfigConvertor(ModelArchConfigConvertorBase):
                     if isinstance(block_names, list) and not any(b.startswith(hf_prefix) for b in block_names):
                         # This stage is not listed → no quantization.
                         return None
+                elif (
+                    getattr(self.hf_config, "model_type", None) == "minicpmo"
+                    and self.stage_config_name == "tts_config"
+                    and str(top_quant.get("quant_method", "")).lower() == "gptq"
+                ):
+                    # MiniCPM-o GPTQ checkpoints quantize only ``llm`` but do
+                    # not record that scope in a block list.
+                    return None
                 return top_quant
 
             # For non-thinker stages (talker, code2wav) whose text_config
