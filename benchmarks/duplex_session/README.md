@@ -45,9 +45,10 @@ Compare the two layouts only on audio-only workloads that stay below 8192
 tokens per session, at no more than 2 concurrent sessions.
 
 The `1gpu-int4` prototype serves `openbmb/MiniCPM-o-4_5-GPTQ` (W4A16 Thinker) at
-a pinned revision, with audio + video and `max_model_len: 16384`. It inherits
-the `1gpu` budget apart from a 2.5 GiB Thinker KV pool. It has not been booted,
-and its stage memory budgets are unmeasured.
+a pinned revision, with audio + video and `max_model_len: 25600` (about 5 min
+per session). It inherits the `1gpu` budget apart from a 7.25 GiB Thinker KV
+pool sized for two full sessions, and its Talker uses the upstream duplex
+sampling (temperature and repetition penalty, no top-k or top-p).
 
 Stage 2 requires `step-audio2==1.0.0` (the `dev` extra in `pyproject.toml`;
 `uv pip install step-audio2==1.0.0`). Do not install `stepaudio2-minicpmo` as

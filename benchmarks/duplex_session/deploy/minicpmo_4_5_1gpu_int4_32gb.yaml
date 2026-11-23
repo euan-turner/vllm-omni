@@ -11,8 +11,9 @@ base_config: minicpmo_4_5_1gpu_32gb.yaml
 
 stages:
   - stage_id: 0
-    # Matches the 2gpu overlay so the layouts compare on the same context cap.
-    max_model_len: 16384
+    # About 5 min of audio + video per session at up to 84 tokens/s. A session
+    # that outgrows this is terminated with context_length_exceeded.
+    max_model_len: 25600
     # Replaces the audio-only mapping. image > 0 builds the SigLIP tower that
     # duplex video_frames use; the video bound limits start-up profiling.
     limit_mm_per_prompt:
@@ -22,15 +23,17 @@ stages:
         num_frames: 32
       audio: 64
   - stage_id: 1
-    hf_overrides:
-      tts_config:
-        # The GPTQ config.json serializes eos_token_id as null, which bypasses
-        # the Talker's num_audio_tokens - 1 fallback.
-        eos_token_id: 6561
+    # Upstream duplex TTS (MiniCPMTTS.generate_chunk) applies temperature and
+    # repetition penalty only: it builds top-k/top-p warpers but never uses them.
+    default_sampling_params:
+      temperature: 0.8
+      repetition_penalty: 1.05
+      top_p: 1.0
+      top_k: -1
 
 platforms:
   cuda:
     stages:
       - stage_id: 0
-        # ~145 KiB/token: 2.5 GiB holds ~18k tokens, one full 16384 request.
-        kv_cache_memory_bytes: 2684354560  # 2.5 GiB
+        # ~7,300 tokens/GiB: 7.25 GiB holds ~53k tokens, two full 25600 requests.
+        kv_cache_memory_bytes: 7784628224  # 7.25 GiB
