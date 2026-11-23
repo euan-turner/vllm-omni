@@ -13,6 +13,7 @@ directory.
 | --- | --- | --- | --- |
 | `2gpu` (default) | [`deploy/minicpmo_4_5_2gpu_32gb.yaml`](deploy/minicpmo_4_5_2gpu_32gb.yaml) | Thinker GPU 0; Talker + Code2Wav GPU 1 | 4 |
 | `1gpu` | [`deploy/minicpmo_4_5_1gpu_32gb.yaml`](deploy/minicpmo_4_5_1gpu_32gb.yaml) | all stages GPU 0 | 2 |
+| `1gpu-int4` | [`deploy/minicpmo_4_5_1gpu_int4_32gb.yaml`](deploy/minicpmo_4_5_1gpu_int4_32gb.yaml) | all stages GPU 0 | 2 |
 
 The `2gpu` overlay inherits the shipped two-GPU profile and adapts it to 32 GB
 cards and the edge target of at most 4 concurrent sessions:
@@ -42,6 +43,11 @@ The `1gpu` overlay fits all three stages into one 32 GB card. Unlike `2gpu`:
 
 Compare the two layouts only on audio-only workloads that stay below 8192
 tokens per session, at no more than 2 concurrent sessions.
+
+The `1gpu-int4` prototype serves `openbmb/MiniCPM-o-4_5-GPTQ` (W4A16 Thinker) at
+a pinned revision, with audio + video and `max_model_len: 16384`. It inherits
+the `1gpu` budget apart from a 2.5 GiB Thinker KV pool. It has not been booted,
+and its stage memory budgets are unmeasured.
 
 Stage 2 requires `step-audio2==1.0.0` (the `dev` extra in `pyproject.toml`;
 `uv pip install step-audio2==1.0.0`). Do not install `stepaudio2-minicpmo` as

@@ -8,7 +8,7 @@
 # nsys (PROFILE=cuda only).
 #
 # Environment:
-#   LAYOUT          1gpu | 2gpu | gh200 (default 2gpu)
+#   LAYOUT          1gpu | 1gpu-int4 | 2gpu | gh200 (default 2gpu)
 #   MAX_MODEL_LEN   Stage-0 max_model_len override (gh200 default 131072). Above
 #                   the HF limit (40960) it exports VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 #   TICK_TRACE_DIR  writes Stage-0 per-tick JSONL records there (default off)
@@ -17,7 +17,9 @@
 #   PROFILE_DIR     output root for traces (default /tmp/duplex_session_profile)
 #   TORCH_WITH_STACK  1 records Python stacks in torch traces (default 0; slows
 #                   /stop_profile and enlarges traces)
-#   MODEL, PORT     default openbmb/MiniCPM-o-4_5, 8099
+#   MODEL, PORT     default openbmb/MiniCPM-o-4_5, 8099. 1gpu-int4 defaults to
+#                   openbmb/MiniCPM-o-4_5-GPTQ at a pinned revision; setting
+#                   MODEL drops that pin
 #   VLLM_SERVER_DEV_MODE  default 1, exposes the cache-reset endpoints that
 #                   profile_run.sh calls; local research servers only
 #   DRY_RUN=1       print the command instead of running it
@@ -29,15 +31,21 @@ PROFILE=${PROFILE:-off}
 PROFILE_STAGES=${PROFILE_STAGES:-0}
 PROFILE_DIR=${PROFILE_DIR:-/tmp/duplex_session_profile}
 TORCH_WITH_STACK=${TORCH_WITH_STACK:-0}
-MODEL=${MODEL:-openbmb/MiniCPM-o-4_5}
 PORT=${PORT:-8099}
 export VLLM_SERVER_DEV_MODE=${VLLM_SERVER_DEV_MODE:-1}
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 HF_MAX_MODEL_LEN=40960
+DEFAULT_MODEL=openbmb/MiniCPM-o-4_5
+DEFAULT_MODEL_REVISION=""
 
 case "$LAYOUT" in
   1gpu) DEPLOY="$REPO_ROOT/benchmarks/duplex_session/deploy/minicpmo_4_5_1gpu_32gb.yaml" ;;
+  1gpu-int4)
+    DEPLOY="$REPO_ROOT/benchmarks/duplex_session/deploy/minicpmo_4_5_1gpu_int4_32gb.yaml"
+    DEFAULT_MODEL=openbmb/MiniCPM-o-4_5-GPTQ
+    DEFAULT_MODEL_REVISION=02b54c54c36f8b48e97501bb0fde5d178c62df38
+    ;;
   2gpu) DEPLOY="$REPO_ROOT/benchmarks/duplex_session/deploy/minicpmo_4_5_2gpu_32gb.yaml" ;;
   gh200)
     DEPLOY="$REPO_ROOT/benchmarks/duplex_session/deploy/minicpmo_4_5_gh200_long_context.yaml"
@@ -45,9 +53,15 @@ case "$LAYOUT" in
     # Stage-0 max_position_embeddings in that deploy file (RoPE table size).
     MAX_POSITIONS=131072
     ;;
-  *) echo "LAYOUT must be 1gpu, 2gpu or gh200, got '$LAYOUT'" >&2; exit 2 ;;
+  *) echo "LAYOUT must be 1gpu, 1gpu-int4, 2gpu or gh200, got '$LAYOUT'" >&2; exit 2 ;;
 esac
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-}
+
+MODEL_REVISION=""
+if [[ -z "${MODEL:-}" ]]; then
+  MODEL=$DEFAULT_MODEL
+  MODEL_REVISION=$DEFAULT_MODEL_REVISION
+fi
 
 if [[ -n "$MAX_MODEL_LEN" ]]; then
   if ! [[ "$MAX_MODEL_LEN" =~ ^[1-9][0-9]*$ ]]; then
@@ -95,6 +109,9 @@ CMD=(vllm-omni serve "$MODEL" --omni
   --chat-template "$REPO_ROOT/vllm_omni/transformers_utils/chat_templates/minicpmo45_native.jinja"
   --chat-template-content-format openai
   --host 0.0.0.0 --port "$PORT")
+if [[ -n "$MODEL_REVISION" ]]; then
+  CMD+=(--revision "$MODEL_REVISION" --code-revision "$MODEL_REVISION")
+fi
 
 declare -A STAGE_FIELDS=()
 if [[ -n "$PROFILER_CONFIG" ]]; then

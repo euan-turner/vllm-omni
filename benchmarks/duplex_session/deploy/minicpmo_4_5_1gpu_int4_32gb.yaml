@@ -1,0 +1,30 @@
+# MiniCPM-o 4.5 W4A16 GPTQ three-stage duplex deploy for one 32 GB GPU
+# (RTX 5090), audio + video. Used by benchmarks/duplex_session/serve.sh
+# LAYOUT=1gpu-int4 with openbmb/MiniCPM-o-4_5-GPTQ.
+#
+# Design doc: docs/design/fullduplex.md (Serving); recipe:
+# recipes/OpenBMB/MiniCPM-o-4_5.md. Inherits the BF16 one-GPU budget and
+# overrides only modality limits, context length and the Thinker KV pool.
+#
+# Prototype: stage memory budgets have not been measured with these weights.
+base_config: minicpmo_4_5_1gpu_32gb.yaml
+
+stages:
+  - stage_id: 0
+    # Matches the 2gpu overlay so the layouts compare on the same context cap.
+    max_model_len: 16384
+    # Replaces the audio-only mapping. image > 0 builds the SigLIP tower that
+    # duplex video_frames use; the video bound limits start-up profiling.
+    limit_mm_per_prompt:
+      image: 1
+      video:
+        count: 1
+        num_frames: 32
+      audio: 64
+
+platforms:
+  cuda:
+    stages:
+      - stage_id: 0
+        # ~145 KiB/token: 2.5 GiB holds ~18k tokens, one full 16384 request.
+        kv_cache_memory_bytes: 2684354560  # 2.5 GiB
