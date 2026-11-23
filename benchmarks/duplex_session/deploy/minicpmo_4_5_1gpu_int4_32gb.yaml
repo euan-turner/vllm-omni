@@ -21,6 +21,12 @@ stages:
         count: 1
         num_frames: 32
       audio: 64
+  - stage_id: 1
+    hf_overrides:
+      tts_config:
+        # The GPTQ config.json serializes eos_token_id as null, which bypasses
+        # the Talker's num_audio_tokens - 1 fallback.
+        eos_token_id: 6561
 
 platforms:
   cuda:
