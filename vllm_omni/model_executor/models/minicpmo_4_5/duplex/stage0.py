@@ -19,6 +19,7 @@ import numpy as np
 from numpy.typing import NDArray
 from vllm.logger import init_logger
 
+from vllm_omni.engine.duplex.tick_trace import duplex_tick_tracer
 from vllm_omni.model_executor.models.minicpmo_4_5.duplex.policy import MiniCPMO45DuplexPolicy
 
 if TYPE_CHECKING:
@@ -154,6 +155,34 @@ class MiniCPMO45Stage0DuplexRuntime:
         # Built with the model, before its weights load and it switches to eval mode:
         # the streaming encoder's CUDA graphs are captured later, by build_audio_cuda_graph().
         self._audio_graph_attempted = False
+        # Opt-in per-tick timing trace (``tick_trace``); ``None`` when disabled.
+        self._tick_trace = duplex_tick_tracer("stage0")
+
+    def trace_prompt(
+        self,
+        session_id: str,
+        epoch: int | None,
+        seq: int | None,
+        prompt_len: object,
+        num_computed_tokens: object,
+        result: dict[str, object],
+    ) -> None:
+        """Record the Stage-0 prompt size for append ``(epoch, seq)`` (``tick_trace`` ``w`` record)."""
+        if self._tick_trace is None:
+            return
+        self._tick_trace.emit(
+            (
+                "w",
+                time.monotonic_ns(),
+                session_id,
+                epoch,
+                seq,
+                prompt_len,
+                num_computed_tokens,
+                result.get("num_input_tokens"),
+                result.get("stage0_window_replaced") is True,
+            )
+        )
 
     def build_audio_cuda_graph(self) -> bool:
         """Capture the streaming-encoder CUDA graphs once weights are loaded (idempotent; failures stay eager).

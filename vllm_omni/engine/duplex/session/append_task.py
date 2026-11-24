@@ -73,6 +73,8 @@ class AppendAttempt:
     on_append_accepted: Callable[[float], None] | None = None
     #: Last chance to call the append off, checked once the predecessor is done.
     before_append: Callable[[], bool] | None = None
+    #: Tick-trace index of this append (``tick_trace``); ``None`` when tracing is off.
+    trace_attempt: int | None = None
 
     # ------------------------------------------------------------------ #
     # Compensation                                                       #
@@ -199,6 +201,7 @@ class AppendAttempt:
                 input_audio_part=self.input_audio_part,
                 input_audio_parts=self.input_audio_parts,
                 on_append_accepted=self.on_append_accepted,
+                trace_attempt=self.trace_attempt,
             )
             if append_ok:
                 model_state.context_locked = True

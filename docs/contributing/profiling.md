@@ -448,3 +448,32 @@ This monitor is intentionally separate from the existing profiling tools:
 The orchestrator monitor does not use `torch.profiler` because the bottleneck signal lives in the orchestrator process (poll-loop duty cycle and queue depth), not inside stage workers. It complements Prometheus metrics when you need a post-run time series for a benchmark or regression run.
 
 Process liveness monitors (`monitor_engine_liveness`, worker/engine-core monitors) are unrelated: they detect crashed workers, not orchestrator load.
+
+## 8. Duplex Tick Trace
+
+> **Warning:** Diagnostic only. Writes one JSON line per append and per stage output; leave it off in production.
+
+A full-duplex model decides once per model tick (1 s for MiniCPM-o 4.5) whether to listen or speak. Per-response TTFT and RTF do not show whether every tick finishes inside its period, and a paced response can report RTF above 1 without any late audio. The duplex tick trace records, per tick, when the input reached the server, when the Stage-0 decision came back, and when the first audio of a speak tick left the final stage, so the remaining slack can be read per context size.
+
+Enable it on the server by pointing an environment variable at a directory. Each tracing process (the orchestrator, every Stage-0 worker and the Talker worker) writes its own `duplex-ticks-<role>-<pid>.jsonl` there:
+
+```bash
+export VLLM_OMNI_DUPLEX_TICK_TRACE_DIR=/tmp/duplex-ticks
+vllm-omni serve ...   # run the sessions, e.g. an OmniInteract benchmark
+python benchmarks/duplex_session/tick_report.py /tmp/duplex-ticks
+```
+
+`tick_report.py` writes `ticks.csv` (one row per tick) and `summary.csv` (per tick kind and 4096-token context bin) and prints the summary:
+
+| Column | Meaning |
+| --- | --- |
+| `kind` | `listen`, `speak`, `speak_empty` (a speak decision whose Talker handoffs carry no hidden rows: the model spoke no words), or `silence` (a runtime silence continuation, with no client input) |
+| `decision_*_ms` | Server ingress of the triggering `AppendAudio` to the first Stage-0 output of the tick |
+| `first_audio_*_ms` | Same start to the first final-stage output after the decision (`speak` and `silence` ticks; not `speak_empty`, whose next audio belongs to a later tick) |
+| `slack_p5_ms`, `slack_min_ms` | Tick period minus the p95 and maximum decision latency |
+| `on_time_frac` | Fraction of ticks whose decision arrived within the tick period |
+| `mailbox_p95_ms` | Time the `AppendAudio` waited in the session mailbox |
+
+A tick is one accepted Stage-0 append; the runner cuts appends per whole model unit. Outputs are attributed to ticks by segment order per request, not by time, because the next append is accepted while the previous segment is still decoding. A request whose finished-segment count differs from its append count is excluded and listed (`EXCLUDED`, exit code 2). `ticks.csv` also gives `handoff_rows`, the hidden rows handed to the Talker between a speak tick's first output and the next tick's (`h` records); it is empty when the trace has no `h` records, and such ticks stay `speak`. Context is the Stage-0 prompt length the worker scheduled for that append.
+
+Timestamps are `time.monotonic_ns()`, comparable across processes on one host only. Per-stage encode, prefill and decode times are not reported: sessions share batched encoder calls and engine steps, so per-session splits of those would not be meaningful. Start latency is server ingress, so the client's own send-ahead (the OmniInteract client sends each 200 ms chunk at its start) is not included.

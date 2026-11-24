@@ -12,6 +12,7 @@ Pipeline:
   5. Next decode embeds that id with emb_code and emits it to Code2Wav
 """
 
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 from functools import cached_property
@@ -34,6 +35,7 @@ from vllm.v1.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.logits_processor import LogitsContext, LogitsProcessor
 
 from vllm_omni.engine.duplex.intermediate import get_tts_handoff
+from vllm_omni.engine.duplex.tick_trace import duplex_tick_tracer
 from vllm_omni.model_executor.models.minicpmo_4_5 import (
     MINICPMO45_DUPLEX_CODEC_TOKENS_PER_CHUNK,
     MINICPMO45_DUPLEX_TURN_END_CODEC_TOKENS,
@@ -601,6 +603,9 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
 
     requires_request_sample_eligibility = True
 
+    #: Opt-in per-tick timing trace (``tick_trace``); ``None`` when disabled.
+    _tick_trace = None
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         from vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni_llm import MiniCPMOConfig
@@ -608,6 +613,7 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
         config: MiniCPMOConfig = vllm_config.model_config.hf_config
         self.config = config
         self.vllm_config = vllm_config
+        self._tick_trace = duplex_tick_tracer("talker")
         # Per-step codec EOS routing decided in make_omni_output: rows to
         # force to EOS (finished segments / chunk budget hit) and rows to
         # mask EOS on (min_tokens / duplex turn-end drain window). Both
@@ -1063,6 +1069,10 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
                 )
                 full_embeds = torch.cat([self.emb_text(placeholder_ids), full_embeds], dim=0)
             embeds = full_embeds[offset : offset + span_len]
+            if native_duplex and self._tick_trace is not None:
+                self._tick_trace.emit(
+                    ("w1", time.monotonic_ns(), request_id, target_len, offset, int(full_embeds.shape[0]), span_len)
+                )
             if embeds.shape[0] != span_len:
                 raise ValueError(
                     "MiniCPM-o Talker prefill span exceeds condition: "

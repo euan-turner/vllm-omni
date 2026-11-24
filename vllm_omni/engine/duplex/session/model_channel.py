@@ -55,6 +55,7 @@ from vllm_omni.engine.duplex.session.emitter import SessionEmitter
 from vllm_omni.engine.duplex.session.engine_session import DuplexEngineSession, DuplexFenceMismatchError
 from vllm_omni.engine.duplex.session.lease import DuplexLeaseActivity
 from vllm_omni.engine.duplex.session.tool_calls import ToolCallOrigin, ToolCallRegistrationError
+from vllm_omni.engine.duplex.tick_trace import duplex_tick_tracer
 from vllm_omni.metrics.stats import OrchestratorAggregator, StageRequestStats
 from vllm_omni.outputs import OmniRequestOutput
 from vllm_omni.outputs.duplex import attach_duplex_output_decision
@@ -181,6 +182,7 @@ class ModelChannel:
         self._schedule_silence_continuation = schedule_silence_continuation
         self._abort_request = abort_request
         self._input_transcriptions: dict[str, CommittedInputContinuation] = {}
+        self._tick_trace = duplex_tick_tracer("orchestrator")
 
     def is_input_transcription(self, request_id: str) -> bool:
         return request_id in self._input_transcriptions
@@ -252,6 +254,7 @@ class ModelChannel:
         input_audio_part: dict[str, object] | None = None,
         input_audio_parts: dict[str, dict[str, object] | None] | None = None,
         on_append_accepted: Callable[[float], None] | None = None,
+        trace_attempt: int | None = None,
     ) -> tuple[bool, bool]:
         session = self._ctx.session
         if not session.capabilities.supports_input_append:
@@ -294,6 +297,8 @@ class ModelChannel:
         if on_append_accepted is not None:
             on_append_accepted(submit_time)
         request_id, _ = duplex_data_plane_request_info(result)
+        if trace_attempt is not None:
+            self._trace_accepted_append(result, trace_attempt, request_id, submit_time)
         if request_id is not None:
             self._ctx.plugin.data_plane.begin_request(request_id)
         close_reason, emitted_response = await self._send_model_output_events(result, expected_epoch=expected_epoch)
@@ -304,6 +309,32 @@ class ModelChannel:
             await self._close_from_runtime(close_reason)
             return False, emitted_response
         return True, emitted_response
+
+    def _trace_accepted_append(
+        self, result: dict[str, object], trace_attempt: int, request_id: str | None, submit_time: float
+    ) -> None:
+        """Record the stage's acceptance of a traced append (``tick_trace`` ``acc`` record)."""
+        tracer = self._tick_trace
+        if tracer is None:
+            return
+        seq = None
+        for item in result.get("stage_results") or ():
+            inner = item.get("result") if isinstance(item, dict) else None
+            if isinstance(inner, dict) and inner.get("data_plane_append") is True:
+                seq = inner.get("seq")
+                break
+        tracer.emit(
+            (
+                "acc",
+                time.monotonic_ns(),
+                self._ctx.session.session_id,
+                trace_attempt,
+                self._ctx.session.epoch,
+                seq,
+                request_id,
+                int(submit_time * 1e9),
+            )
+        )
 
     def _mark_accepted_append_request_start(self, payload: object) -> None:
         """Stamp TTFT/TTFP origin only after the data plane accepted this append."""

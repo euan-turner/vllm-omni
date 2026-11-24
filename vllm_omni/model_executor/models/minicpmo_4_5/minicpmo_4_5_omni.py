@@ -528,6 +528,7 @@ class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
                 return input_ids, embeds, {"duplex": {"prefill_success": False, "reason": str(exc)}}
             result = helper._stage_prefill_embeddings_only(state, audio_waveform, **prefill_kwargs)
         update_result = dict(result)
+        helper.trace_prompt(session_id, prefill_kwargs["epoch"], seq, prompt_len_meta, token_offset_meta, result)
         if result.get("stage0_window_replaced") is True:
             window = duplex.get("stage0_window", {})
             logger.info(
