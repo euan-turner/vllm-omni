@@ -320,6 +320,14 @@ async def test_append_submits_the_resumable_stage0_request_and_counts_it_running
     assert counter.value == 1
     session = orchestrator.session_manager.get(SESSION_ID)
     assert session is not None and session.stage_request_submitted(0, request_id)
+    # The plugin's ledger keys restart with each append and its re-sent
+    # snapshots keep one value, instead of growing for the session.
+    assert orchestrator.stage_pools[0].output_processor.output_key_policies == {
+        request_id: (
+            MiniCPMO45DuplexPlugin.stage0_segment_scoped_output_keys,
+            MiniCPMO45DuplexPlugin.stage0_snapshot_output_keys,
+        )
+    }
 
     # Later units update the same resumable request; the counter stays at one.
     await _submit(orchestrator, _append_audio())

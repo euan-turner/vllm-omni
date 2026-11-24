@@ -1081,7 +1081,9 @@ def llm2tts(
                 thinker_text = handoff_text
         model_intermediate_buffer = build_duplex_intermediate_buffer(
             request_id=str(llm_output.request_id),
-            prompt_token_ids=prompt_token_ids,
+            # The native Talker conditions on the handoff ids and hidden rows
+            # only; the Thinker prompt is not part of its request.
+            prompt_token_ids=None if is_native_duplex_handoff else prompt_token_ids,
             output_token_ids=llm_output_ids,
             output_text=thinker_text,
             stream_output=is_native_duplex_handoff,

@@ -302,6 +302,13 @@ class DuplexModelPlugin(ABC):
         return None
 
     projects_intermediate_outputs: bool = False
+    #: Stage-0 multimodal output keys that the session's resumable Stage-0
+    #: request accumulates per append only. Declare keys whose downstream
+    #: consumer reads just the current segment; others grow for the session.
+    stage0_segment_scoped_output_keys: frozenset[str] = frozenset()
+    #: Stage-0 multimodal output keys that each step re-sends whole; only the
+    #: latest value is kept instead of concatenating every step's copy.
+    stage0_snapshot_output_keys: frozenset[str] = frozenset()
     plugin_id: str = ""
     private_runtime_config_keys: frozenset[str] = frozenset()
     #: Samples per silence unit the runner appends to keep a model turn going.

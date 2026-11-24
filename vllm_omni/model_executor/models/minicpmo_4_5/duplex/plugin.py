@@ -591,6 +591,11 @@ class MiniCPMO45DuplexPlugin(DuplexModelPlugin):
     """MiniCPM-owned sampling policy, append planning, session state and output projection."""
 
     plugin_id = "minicpmo45"
+    # llm2tts matches the current unit's rows in this ledger, and a unit never
+    # spans an append, so the hidden rows need not outlive their segment.
+    stage0_segment_scoped_output_keys = frozenset({"latent", "latent_input_ids", "latent_positions"})
+    # The prompt tail and the tokenizer's special ids are re-sent whole each step.
+    stage0_snapshot_output_keys = frozenset({"duplex_prompt_token_ids", "meta"})
     private_runtime_config_keys = PRIVATE_RUNTIME_CONFIG_KEYS
     silence_continuation_samples = 16000
 

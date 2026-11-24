@@ -246,6 +246,9 @@ async def test_add_request_attaches_payload_once_and_streaming_update_does_not(m
 async def test_duplex_session_submit_does_not_request_payload(mocker) -> None:
     orchestrator = _orchestrator(cls=DuplexOrchestrator)
     orchestrator.replica_placement = None
+    orchestrator.plugin = SimpleNamespace(
+        stage0_segment_scoped_output_keys=frozenset(), stage0_snapshot_output_keys=frozenset()
+    )
     prewarm = mocker.AsyncMock(return_value=True)
     orchestrator._prewarm_async_chunk_stages = prewarm  # type: ignore[method-assign]
     sampling_params = tuple(_sampling_params())

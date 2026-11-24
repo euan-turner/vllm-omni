@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """Regression tests for OmniRequestState multimodal DELTA drain and consolidation guard."""
 
+from collections import deque
 from dataclasses import dataclass
 from enum import Flag
 from types import SimpleNamespace
@@ -1665,3 +1666,136 @@ def test_native_finished_stats_preserve_watermark_status(watermarked, skipped, s
     assert stats.num_watermarked_reqs == int(watermarked)
     assert stats.num_watermark_skipped_reqs == int(skipped)
     assert stats.num_not_watermarked_reqs == int(not watermarked and not skipped)
+
+
+def _latent_step(rows: int, start: int) -> dict:
+    return {
+        "latent": torch.arange(start, start + rows, dtype=torch.float32).reshape(rows, 1),
+        "latent_input_ids": torch.arange(start, start + rows).reshape(rows, 1),
+        "other": torch.ones(rows, 1),
+    }
+
+
+_SCOPED = frozenset({"latent", "latent_input_ids"})
+
+
+def test_segment_scoped_keys_restart_on_update_and_keep_issued_snapshot():
+    state = _make_state(RequestOutputKind.CUMULATIVE)
+    state.segment_scoped_keys = _SCOPED
+    state.add_multimodal_tensor(_latent_step(3, 0), mm_type=LATENT)
+    issued = state.make_request_output([1], None, FinishReason.STOP, None).outputs[0].multimodal_output
+    issued_latent = issued["latent"]
+
+    state.apply_streaming_update(_StreamingUpdate(final=False, prompt=None, prompt_token_ids=[0], arrival_time=1.0))
+
+    assert "latent" not in state.mm_accumulated and "latent_input_ids" not in state.mm_accumulated
+    assert "other" in state.mm_accumulated
+    assert issued["latent"] is issued_latent and torch.equal(issued_latent, torch.arange(3.0).reshape(3, 1))
+
+    state.add_multimodal_tensor(_latent_step(2, 3), mm_type=LATENT)
+    nxt = state.make_request_output([1], None, FinishReason.STOP, None).outputs[0].multimodal_output
+    assert torch.equal(nxt["latent"], torch.tensor([[3.0], [4.0]]))
+    assert nxt["other"].shape[0] == 5
+
+
+def test_streaming_update_keeps_latent_history_without_scoped_keys():
+    state = _make_state(RequestOutputKind.CUMULATIVE)
+    state.add_multimodal_tensor(_latent_step(3, 0), mm_type=LATENT)
+    state.make_request_output([1], None, FinishReason.STOP, None)
+    state.apply_streaming_update(_StreamingUpdate(final=False, prompt=None, prompt_token_ids=[0], arrival_time=1.0))
+    state.add_multimodal_tensor(_latent_step(2, 3), mm_type=LATENT)
+
+    latent = state.make_request_output([1], None, FinishReason.STOP, None).outputs[0].multimodal_output["latent"]
+
+    assert latent.shape[0] == 5
+
+
+def _streaming_processor(state: OmniRequestState) -> MultimodalOutputProcessor:
+    processor = object.__new__(MultimodalOutputProcessor)
+    processor.request_states = {"r": state}
+    return processor
+
+
+def test_set_output_key_policy_reports_unknown_request():
+    processor = _streaming_processor(_make_state(RequestOutputKind.CUMULATIVE))
+
+    assert processor.set_output_key_policy("missing", segment_scoped=_SCOPED) is False
+    assert processor.set_output_key_policy("r", segment_scoped=_SCOPED, snapshot={"prompt_tail"}) is True
+    state = processor.request_states["r"]
+    assert (state.segment_scoped_keys, state.snapshot_keys) == (_SCOPED, frozenset({"prompt_tail"}))
+
+
+def test_queued_update_trims_only_after_the_segment_finish_output():
+    state = _make_state(RequestOutputKind.CUMULATIVE)
+    processor = _streaming_processor(state)
+    processor.set_output_key_policy("r", segment_scoped=_SCOPED)
+    state.streaming_input = True
+    state.input_chunk_queue = deque()  # segment in flight
+    state.add_multimodal_tensor(_latent_step(3, 0), mm_type=LATENT)
+    update_request = SimpleNamespace(resumable=True, prompt_token_ids=[0], arrival_time=1.0)
+
+    processor._update_streaming_request_state(state, update_request, None)
+
+    assert len(state.input_chunk_queue) == 1 and "latent" in state.mm_accumulated
+    state.add_multimodal_tensor(_latent_step(1, 3), mm_type=LATENT)
+    finish = state.make_request_output([1], None, FinishReason.STOP, None).outputs[0].multimodal_output
+    assert finish["latent"].shape[0] == 4
+    # Upstream applies the queued update right after that finish output.
+    state.apply_streaming_update(state.input_chunk_queue.popleft())
+    assert "latent" not in state.mm_accumulated
+
+
+def test_immediate_update_trims_after_the_previous_segment_finished():
+    state = _make_state(RequestOutputKind.CUMULATIVE)
+    processor = _streaming_processor(state)
+    processor.set_output_key_policy("r", segment_scoped=_SCOPED)
+    state.streaming_input = True
+    state.add_multimodal_tensor(_latent_step(3, 0), mm_type=LATENT)
+    finish = state.make_request_output([1], None, FinishReason.STOP, None).outputs[0].multimodal_output
+    state.input_chunk_queue = None  # upstream: the segment finished with nothing queued
+
+    processor._update_streaming_request_state(
+        state, SimpleNamespace(resumable=True, prompt_token_ids=[0], arrival_time=1.0), None
+    )
+
+    assert "latent" not in state.mm_accumulated
+    assert finish["latent"].shape[0] == 3
+
+
+@pytest.mark.parametrize("output_kind", [RequestOutputKind.CUMULATIVE, RequestOutputKind.DELTA])
+def test_snapshot_keys_keep_only_the_latest_value(output_kind):
+    state = _make_state(output_kind)
+    state.snapshot_keys = frozenset({"prompt_tail", "meta"})
+    issued = None
+    for step in range(6):
+        payload = {"latent": torch.zeros(1, 2), "prompt_tail": torch.tensor([100 + step])}
+        if step % 2 == 0:
+            payload["meta"] = {"listen_token_id": torch.tensor([7])}
+        state.add_multimodal_tensor(payload, mm_type=LATENT)
+        out = state.make_request_output([1], None, None, None)
+        if step == 0 and out is not None:
+            issued = out.outputs[0].multimodal_output
+    state.add_multimodal_tensor({"latent": torch.zeros(1, 2)}, mm_type=LATENT)  # a step without the keys
+
+    accumulated = state.mm_accumulated
+    tail = accumulated["prompt_tail"]
+    tail = tail[-1] if isinstance(tail, list) else tail
+    assert torch.equal(torch.as_tensor(tail).reshape(-1), torch.tensor([105]))
+    meta = accumulated["meta"]
+    listen = meta["listen_token_id"]
+    assert not isinstance(listen, list) and torch.equal(listen.reshape(-1), torch.tensor([7]))
+    if issued is not None:
+        assert torch.equal(torch.as_tensor(issued["prompt_tail"]).reshape(-1), torch.tensor([100]))
+
+
+def test_snapshot_keys_survive_streaming_updates_while_scoped_keys_restart():
+    state = _make_state(RequestOutputKind.CUMULATIVE)
+    state.segment_scoped_keys = frozenset({"latent"})
+    state.snapshot_keys = frozenset({"prompt_tail"})
+    state.add_multimodal_tensor({"latent": torch.zeros(3, 2), "prompt_tail": torch.tensor([9])}, mm_type=LATENT)
+    state.make_request_output([1], None, FinishReason.STOP, None)
+
+    state.apply_streaming_update(_StreamingUpdate(final=False, prompt=None, prompt_token_ids=[0], arrival_time=1.0))
+
+    assert "latent" not in state.mm_accumulated
+    assert torch.equal(torch.as_tensor(state.mm_accumulated["prompt_tail"]).reshape(-1), torch.tensor([9]))

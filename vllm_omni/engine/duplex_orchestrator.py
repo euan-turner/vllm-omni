@@ -586,6 +586,12 @@ class DuplexOrchestrator(Orchestrator, DuplexStagePort):
                 if pinned_replica_id is not None:
                     await self._handle_dead_replica(context.stage_id, pinned_replica_id, exc)
                 raise
+            segment_scoped_keys = self.plugin.stage0_segment_scoped_output_keys
+            snapshot_keys = self.plugin.stage0_snapshot_output_keys
+            if submission.resumable and context.stage_id == 0 and (segment_scoped_keys or snapshot_keys):
+                pool.output_processor.set_output_key_policy(
+                    context.request_id, segment_scoped=segment_scoped_keys, snapshot=snapshot_keys
+                )
 
         # The current-stage send has completed. Downstream prewarm
         # must not hold up another session's use of this stage's sender cache.
