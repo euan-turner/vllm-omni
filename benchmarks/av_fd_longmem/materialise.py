@@ -136,6 +136,7 @@ def probe_clip(path: Path) -> ClipProbe:
     )
 
 
-def wav_duration_ms(path: Path) -> int:
+def media_duration_s(path: Path) -> float:
+    """Container duration of any media file, without decoding it."""
     info = json.loads(_run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)]))
-    return round(float(info["format"]["duration"]) * 1000)
+    return float(info["format"]["duration"])

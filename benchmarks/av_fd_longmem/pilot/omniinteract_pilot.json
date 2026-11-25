@@ -10,6 +10,6 @@
     {"clip": "0115", "qa_index": 6, "query_text": "刚才那个咸蛋的标价是多少钱一颗？", "answer_override": "2元一颗", "lag_chunks": 180, "modality": "visual"},
     {"clip": "0108", "qa_index": 0, "query_text": "刚才那副墨镜标价多少钱？", "lag_chunks": 60, "modality": "visual"},
     {"clip": "0102", "qa_index": 4, "query_text": "刚才地铁上那个位置是几号车几号门？", "lag_chunks": 30, "modality": "visual"},
-    {"clip": "0127", "qa_index": 0, "query_text": "刚才看到的那家酒店叫什么名字？", "lag_chunks": 10, "modality": "visual"}
+    {"clip": "0127", "qa_index": 0, "query_text": "刚才看到的那家酒店叫什么名字？", "answer_override": "麗枫酒店（LAVANDE）", "lag_chunks": 10, "modality": "visual"}
   ]
 }
