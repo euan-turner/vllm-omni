@@ -12,7 +12,14 @@ from pathlib import Path
 
 import pytest
 
-from benchmarks.av_fd_longmem.residency import TraceRejectedError, load_session_trace, probe_residency, unit_spans
+from benchmarks.av_fd_longmem.residency import (
+    TraceRejectedError,
+    append_chunk,
+    load_session_trace,
+    probe_residency,
+    seq_chunk,
+    unit_spans,
+)
 from benchmarks.av_fd_longmem.schema import ClipRef, Item, ItemClips, Probe, QueryClip
 from benchmarks.av_fd_longmem.score import TimedText, answer_keys, carries_key, judge_probe
 
@@ -149,12 +156,33 @@ def test_probe_labels_count_only_drops_before_the_query(
     assert residency.label == label
     if label == "out":
         assert residency.evicted_token_frac == pytest.approx((79 * 3 + 69) / (79 * 4))
-        assert residency.first_evict_chunk == residency.last_evict_chunk == 90
-        assert residency.chunks_since_eviction == 10
+        assert residency.first_evict_chunk == residency.last_evict_chunk == 89  # seq 90 is chunk 89
+        assert residency.chunks_since_eviction == 11
     elif label == "partial":
         assert residency.evicted_token_frac is None
     else:
         assert residency.evicted_token_frac == frac
+
+
+def test_unit_chunks_follow_the_append_layout(tmp_path: Path) -> None:
+    _write_trace(tmp_path / "t.jsonl", [])
+    spans = unit_spans(load_session_trace(tmp_path, SESSION))
+
+    assert [append_chunk(n) for n in (1, 5, 6, 10)] == [0, 0, 1, 1]
+    assert seq_chunk(spans, 1) == 0 and seq_chunk(spans, 100) == 99
+
+
+def test_a_drop_on_a_silence_continuation_unit_counts_at_the_previous_client_chunk(tmp_path: Path) -> None:
+    _write_trace(tmp_path / "t.jsonl", [])
+    path = tmp_path / "t.jsonl"
+    silence = [["start", 905, SESSION, 999, 0, True], ["acc", 906, SESSION, 999, 0, 90_5, "req", 905]]
+    drop = _ev(90_5, [[31, 79, 79, 10, 64], [32, 79, 79, 10, 64], [33, 79, 79, 10, 64], [34, 79, 79, 10, 64]])
+    path.write_text(path.read_text() + "".join(json.dumps(r) + "\n" for r in [*silence, drop]), encoding="utf-8")
+    records = load_session_trace(tmp_path, SESSION)
+
+    assert seq_chunk(unit_spans(records), 90_5) == 199
+    residency = probe_residency(_probe(query_onset=250), records)
+    assert residency.label == "out" and residency.last_evict_chunk == 199
 
 
 def test_a_trace_with_dropped_records_is_rejected(tmp_path: Path) -> None:

@@ -33,10 +33,10 @@ from pathlib import Path
 
 from benchmarks.av_fd_longmem.planner import _filler_segments
 from benchmarks.av_fd_longmem.residency import (
-    APPEND_MS,
     SINK_RESIDUE_TOKENS,
-    UnitSpan,
+    append_chunk,
     load_session_trace,
+    seq_chunk,
     unit_spans,
 )
 from benchmarks.av_fd_longmem.schema import FillerClip, SessionPlan
@@ -83,14 +83,10 @@ class UnitWindow:
         return None if self.out_chunk is None else self.out_chunk - self.chunk
 
 
-def _span_chunk(span: UnitSpan) -> int:
-    return ((span.last_append - 1) * APPEND_MS) // 1000
-
-
 def unit_windows(records: dict[str, list[list]]) -> list[UnitWindow]:
     """Per accepted unit with client input: its chunk, token split and when it left the window."""
     spans = unit_spans(records)
-    chunk_of = {span.seq: _span_chunk(span) for span in spans}
+    chunk_of = {span.seq: append_chunk(span.last_append) for span in spans}
     first_len: dict[int, int] = {}
     dropped: dict[int, int] = defaultdict(int)
     audio: dict[int, int] = defaultdict(int)
@@ -98,9 +94,9 @@ def unit_windows(records: dict[str, list[list]]) -> list[UnitWindow]:
     first_drop: dict[int, int] = {}
     out_at: dict[int, int] = {}
     for row in sorted(records["ev"], key=lambda r: r[1]):
-        at = chunk_of.get(row[4])
+        at = seq_chunk(spans, row[4])
         if at is None:
-            continue
+            raise ValueError(f"ev record at seq {row[4]} precedes every client unit")
         for unit_seq, unit_tokens, dropped_tokens, dropped_audio, dropped_image in row[7]:
             first_len.setdefault(unit_seq, unit_tokens)
             dropped[unit_seq] += dropped_tokens

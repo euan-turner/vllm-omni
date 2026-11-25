@@ -13,8 +13,10 @@ A unit is *out* once its cumulative dropped tokens reach its length less one
 KV block (a sink residue may stay, see ``tick_trace.py``), *partial* once any
 token is dropped, else *in*. A probe is in-window when every evidence unit is
 in, out-of-window when every one is out, else partial. Only drops recorded
-before the query onset count. A trace with ``trace_dropped`` is rejected: a lost
-``ev`` would read as in-window.
+before the query onset count; a drop is dated by the chunk of the unit it was
+handled with (a silence-continuation unit takes the chunk of the client unit
+before it). A trace with ``trace_dropped`` is rejected: a lost ``ev`` would
+read as in-window.
 
 External dependencies: none.
 """
@@ -93,11 +95,24 @@ def chunk_units(spans: list[UnitSpan], chunk: int) -> set[int]:
     return {span.seq for span in spans if span.first_append <= last and first <= span.last_append}
 
 
-def _append_chunk(spans: list[UnitSpan], seq: int) -> int | None:
+def append_chunk(append: int) -> int:
+    """Stream chunk of client append ``append`` (1-based): chunk c is appends ``5c+1 .. 5c+5``."""
+    return ((append - 1) * APPEND_MS) // 1000
+
+
+def seq_chunk(spans: list[UnitSpan], seq: int) -> int | None:
+    """Stream chunk at which the unit accepted as ``seq`` was handled.
+
+    A client unit maps to the chunk of its last append. A silence-continuation
+    unit has no client input; it maps to the latest client unit before it.
+    ``None`` only when no client unit precedes ``seq``.
+    """
+    latest: UnitSpan | None = None
     for span in spans:
-        if span.seq == seq:
-            return (span.last_append * APPEND_MS) // 1000
-    return None
+        if span.seq > seq:
+            break
+        latest = span
+    return None if latest is None else append_chunk(latest.last_append)
 
 
 def probe_residency(probe: Probe, records: dict[str, list[list]]) -> ProbeResidency:
@@ -112,8 +127,10 @@ def probe_residency(probe: Probe, records: dict[str, list[list]]) -> ProbeReside
     dropped: dict[int, int] = defaultdict(int)
     evict_chunks: list[int] = []
     for row in sorted(records["ev"], key=lambda r: r[1]):
-        at_chunk = _append_chunk(spans, row[4])
-        if at_chunk is None or at_chunk >= probe.query_onset_chunk:
+        at_chunk = seq_chunk(spans, row[4])
+        if at_chunk is None:
+            raise TraceRejectedError(f"ev record at seq {row[4]} precedes every client unit")
+        if at_chunk >= probe.query_onset_chunk:
             continue
         for unit_seq, unit_tokens, dropped_tokens, _audio, _image in row[7]:
             if unit_seq in evidence_units:
