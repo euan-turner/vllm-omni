@@ -38,6 +38,7 @@ from vllm_omni.engine.duplex.plugin import DuplexModelPlugin, validate_duplex_re
 from vllm_omni.engine.duplex.replica_placement import DuplexReplicaPlacement
 from vllm_omni.engine.duplex.session.engine_session import DuplexFenceMismatchError
 from vllm_omni.engine.duplex.session.manager import DuplexSessionManager
+from vllm_omni.engine.duplex.tick_trace import duplex_tick_tracer
 from vllm_omni.engine.messages import EngineQueueMessage, OutputMessage
 from vllm_omni.engine.orchestrator import (
     Orchestrator,
@@ -88,6 +89,7 @@ class DuplexOrchestrator(Orchestrator, DuplexStagePort):
         super().__init__(*args, **kwargs)
         self.plugin = plugin
         self.duplex_session_config = duplex_session_config
+        self._tick_trace = duplex_tick_tracer("orchestrator")
         self.replica_placement: DuplexReplicaPlacement | None = None
         admission_limit = None
         if duplex_session_config.replica_policy == "least_sessions":
@@ -211,6 +213,19 @@ class DuplexOrchestrator(Orchestrator, DuplexStagePort):
             return True
         segment = req_state.streaming.segment(stage_id)
         finished = bool(getattr(output, "finished", False)) or (req_state.streaming.enabled and segment.finished)
+        if self._tick_trace is not None:
+            completions = getattr(output, "outputs", None) or ()
+            self._tick_trace.emit(
+                (
+                    "out",
+                    _time.monotonic_ns(),
+                    req_state.session_id,
+                    stage_id,
+                    request_id,
+                    finished,
+                    len(getattr(completions[0], "token_ids", None) or ()) if completions else 0,
+                )
+            )
         transcript = self.plugin.user_transcript(
             stage_id=stage_id,
             output=output,
@@ -483,6 +498,33 @@ class DuplexOrchestrator(Orchestrator, DuplexStagePort):
             kwargs["replica_id"] = replica_id
         return await super()._build_next_stage_request(req_id, next_stage_id, next_input, params, **kwargs)
 
+    async def _forward_to_next_stage(
+        self,
+        req_id: str,
+        src_stage_id: int,
+        output: Any,
+        req_state: OrchestratorRequestState,
+        **kwargs: Any,
+    ) -> None:
+        """Forward as the base orchestrator does; record its duration in the tick trace when enabled."""
+        if self._tick_trace is None:
+            await super()._forward_to_next_stage(req_id, src_stage_id, output, req_state, **kwargs)
+            return
+        started = _time.monotonic_ns()
+        try:
+            await super()._forward_to_next_stage(req_id, src_stage_id, output, req_state, **kwargs)
+        finally:
+            self._tick_trace.emit(
+                (
+                    "fwd",
+                    started,
+                    getattr(req_state, "session_id", None),
+                    src_stage_id,
+                    req_id,
+                    _time.monotonic_ns(),
+                )
+            )
+
     async def submit(self, submission: DuplexStageSubmission) -> DuplexStageSubmissionResult:
         context = submission.context
         input_guard = nullcontext() if submission.resumable else self._stage_input_submission(context.stage_id)
@@ -544,6 +586,12 @@ class DuplexOrchestrator(Orchestrator, DuplexStagePort):
                 if pinned_replica_id is not None:
                     await self._handle_dead_replica(context.stage_id, pinned_replica_id, exc)
                 raise
+            segment_scoped_keys = self.plugin.stage0_segment_scoped_output_keys
+            snapshot_keys = self.plugin.stage0_snapshot_output_keys
+            if submission.resumable and context.stage_id == 0 and (segment_scoped_keys or snapshot_keys):
+                pool.output_processor.set_output_key_policy(
+                    context.request_id, segment_scoped=segment_scoped_keys, snapshot=snapshot_keys
+                )
 
         # The current-stage send has completed. Downstream prewarm
         # must not hold up another session's use of this stage's sender cache.

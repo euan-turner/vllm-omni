@@ -111,6 +111,7 @@ from vllm_omni.engine.duplex.session.tool_calls import (
     ToolCallSettlement,
     ToolCallState,
 )
+from vllm_omni.engine.duplex.tick_trace import duplex_tick_tracer
 from vllm_omni.engine.duplex.turn_detection import (
     TurnDetectionResult,
 )
@@ -218,6 +219,11 @@ class DuplexSessionRunner:
         # too, even before it reaches the PCM buffer. Continuations must not
         # insert a synthetic frame ahead of that already-received audio.
         self._pending_input_appends = 0
+        # Opt-in per-tick timing trace (``tick_trace``); ``None`` when disabled.
+        self._tick_trace = duplex_tick_tracer("orchestrator")
+        self._trace_appends_in = 0
+        self._trace_appends_dequeued = 0
+        self._trace_append_attempts = 0
         # Set when a continuation bails because of that counter, and replayed
         # only if the append then submits nothing (overlap drop / ack /
         # continue_output). A real submission clears it.
@@ -305,6 +311,9 @@ class DuplexSessionRunner:
     def submit(self, command: DuplexCommand) -> None:
         if isinstance(command, AppendAudio):
             self._pending_input_appends += 1
+            if self._tick_trace is not None:
+                self._trace_appends_in += 1
+                self._tick_trace.emit(("in", time.monotonic_ns(), self.session.session_id, self._trace_appends_in))
         self._mailbox.put_nowait(command)
 
     def on_stage_output(
@@ -554,6 +563,11 @@ class DuplexSessionRunner:
     async def _run(self) -> None:
         while not self._worker_stopped:
             item = await self._mailbox.get()
+            if self._tick_trace is not None and isinstance(item, AppendAudio):
+                self._trace_appends_dequeued += 1
+                self._tick_trace.emit(
+                    ("dq", time.monotonic_ns(), self.session.session_id, self._trace_appends_dequeued)
+                )
             try:
                 await self._handle_item(item)
             except asyncio.CancelledError:
@@ -1513,6 +1527,20 @@ class DuplexSessionRunner:
                 for segment in segments
                 if isinstance(segment, dict) and isinstance(segment.get("item_id"), str)
             }
+        trace_attempt = None
+        if self._tick_trace is not None:
+            self._trace_append_attempts += 1
+            trace_attempt = self._trace_append_attempts
+            self._tick_trace.emit(
+                (
+                    "start",
+                    time.monotonic_ns(),
+                    session.session_id,
+                    trace_attempt,
+                    self._trace_appends_dequeued,
+                    silence_continuation,
+                )
+            )
         attempt = AppendAttempt(
             ctx=self.ctx,
             out=self.out,
@@ -1531,6 +1559,7 @@ class DuplexSessionRunner:
             input_audio_parts=input_audio_parts,
             on_append_accepted=on_append_accepted,
             before_append=before_append,
+            trace_attempt=trace_attempt,
         )
 
         self._reset_failed_append_tail()

@@ -240,10 +240,15 @@ class FakeOutputProcessor:
         self.request_outputs = list(request_outputs or [])
         self.add_request_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
         self.abort_calls: list[list[str]] = []
+        self.output_key_policies: dict[str, tuple[frozenset[str], frozenset[str]]] = {}
 
     def add_request(self, *args, **kwargs) -> None:
         self.add_request_calls.append((args, kwargs))
         return None
+
+    def set_output_key_policy(self, request_id: str, *, segment_scoped=(), snapshot=()) -> bool:
+        self.output_key_policies[request_id] = (frozenset(segment_scoped), frozenset(snapshot))
+        return True
 
     def process_outputs(self, *_args, **_kwargs):
         return SimpleNamespace(

@@ -144,10 +144,25 @@ class OmniRequestState(RequestState):
         # types (e.g. dict[str, str]) for future multi-output models.
         self.mm_type: str | None = None
         self.mm_accumulated: MultimodalPayload = MultimodalPayload()
+        # Per-request key policies (``MultimodalOutputProcessor.set_output_key_policy``):
+        # segment-scoped keys restart with every applied streaming update;
+        # snapshot keys keep only the latest value a step carried.
+        self.segment_scoped_keys: frozenset[str] = frozenset()
+        self.snapshot_keys: frozenset[str] = frozenset()
 
     def apply_streaming_update(self, update) -> None:
+        """Start the next streaming segment; segment-scoped multimodal keys restart empty.
+
+        Upstream applies an update only after the previous segment's final
+        output was built, so dropping the keys here never removes rows that
+        segment still needed. Keys are removed, never resized in place, because
+        an output already handed out shares their storage.
+        """
         super().apply_streaming_update(update)
         self.native_text_stats = RequestStateStats(arrival_time=float(update.arrival_time or 0.0))
+        for key in self.segment_scoped_keys:
+            self.mm_accumulated.tensors.pop(key, None)
+            self.mm_accumulated.metadata.pop(key, None)
 
     def add_multimodal_tensor(self, payload: Any | None, mm_type: str | None) -> None:
         """Accumulate a multimodal tensor payload into the request state.
@@ -166,6 +181,10 @@ class OmniRequestState(RequestState):
 
             incoming = MultimodalPayload.from_raw(payload, modality_key)
             if incoming is not None:
+                for key in self.snapshot_keys:
+                    if key in incoming.tensors or key in incoming.metadata:
+                        self.mm_accumulated.tensors.pop(key, None)
+                        self.mm_accumulated.metadata.pop(key, None)
                 replace_snapshot_keys(self.mm_accumulated, incoming)
                 replace_nemotron_snapshot_keys(self.mm_accumulated, incoming)
                 self.mm_accumulated = self.mm_accumulated.merged_with(incoming)
@@ -685,6 +704,29 @@ class MultimodalOutputProcessor(VLLMOutputProcessor):
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
         self.external_req_ids[req_state.external_req_id].append(request_id)
+
+    def set_output_key_policy(
+        self,
+        request_id: str,
+        *,
+        segment_scoped: Iterable[str] = (),
+        snapshot: Iterable[str] = (),
+    ) -> bool:
+        """Bound how a streaming request accumulates selected multimodal output keys.
+
+        ``segment_scoped`` keys restart empty at each applied streaming update,
+        for consumers that read only the current segment. ``snapshot`` keys keep
+        only the latest value a step carried (a step without the key leaves the
+        previous value), for producers that re-send a whole value. Without a
+        policy both would grow for the life of a resumable request. Returns
+        ``False`` when the request is no longer registered.
+        """
+        req_state = self.request_states.get(request_id)
+        if not isinstance(req_state, OmniRequestState):
+            return False
+        req_state.segment_scoped_keys = frozenset(segment_scoped)
+        req_state.snapshot_keys = frozenset(snapshot)
+        return True
 
     def remove_request(self, request_id: str) -> None:
         """Rollback one previously registered request if it was never submitted."""

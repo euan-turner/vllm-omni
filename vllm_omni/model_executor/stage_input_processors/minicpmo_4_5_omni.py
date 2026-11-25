@@ -3,6 +3,7 @@
 """MiniCPM-o 4.5 Thinker-to-Talker and Talker-to-Code2Wav bridges."""
 
 import logging
+import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -15,6 +16,7 @@ from vllm_omni.engine.duplex.intermediate import (
     set_ref_audio,
     set_tts_handoff,
 )
+from vllm_omni.engine.duplex.tick_trace import duplex_tick_tracer
 from vllm_omni.inputs.data import OmniTokensPrompt
 from vllm_omni.model_executor.models.minicpmo_4_5 import (
     MINICPMO45_DUPLEX_CODEC_TOKENS_PER_CHUNK,
@@ -1079,13 +1081,28 @@ def llm2tts(
                 thinker_text = handoff_text
         model_intermediate_buffer = build_duplex_intermediate_buffer(
             request_id=str(llm_output.request_id),
-            prompt_token_ids=prompt_token_ids,
+            # The native Talker conditions on the handoff ids and hidden rows
+            # only; the Thinker prompt is not part of its request.
+            prompt_token_ids=None if is_native_duplex_handoff else prompt_token_ids,
             output_token_ids=llm_output_ids,
             output_text=thinker_text,
             stream_output=is_native_duplex_handoff,
             native_duplex=is_native_duplex_handoff,
         )
         if is_native_duplex_handoff:
+            tracer = duplex_tick_tracer("orchestrator")
+            if tracer is not None:
+                raw_prompt = mm_output.get("duplex_prompt_token_ids")
+                tracer.emit(
+                    (
+                        "h",
+                        time.monotonic_ns(),
+                        str(llm_output.request_id),
+                        int(raw_prompt.numel()) if isinstance(raw_prompt, torch.Tensor) else None,
+                        len(model_intermediate_buffer.get("prompt_token_ids") or ()),
+                        0 if tts_hidden_slice is None else int(tts_hidden_slice.shape[0]),
+                    )
+                )
             turn_eos_id = special_token_ids.get("turn_eos_token_id")
             meta = model_intermediate_buffer.setdefault("meta", {})
             data_plane_metadata = _native_duplex_data_plane_metadata(_streaming_context)

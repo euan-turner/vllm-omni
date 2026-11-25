@@ -1,0 +1,68 @@
+# MiniCPM-o 4.5 three-stage deploy on one RTX 5090 with 32GB VRAM.
+# GPTQ model at: https://huggingface.co/openbmb/MiniCPM-o-4_5-GPTQ
+
+# Inherits the base three-stage deploy from minicpmo_4_5.yaml, but overrides the
+# modality limits, capacity, memory, context length and the Thinker KV pool.
+
+# Target is <= 2 concurrent sessions
+
+base_config: ../../../vllm_omni/deploy/minicpmo_4_5.yaml
+
+duplex_session:
+  max_sessions: 2
+  # Each session can have up to 2 concurrent requests.
+connectors:
+  connector_of_shared_memory:
+    extra:
+      micro_batch_size: 2
+      # Capture only the steady-chunk HiFT graphs
+      hift_graph_continuation_frames: []
+
+stages:
+  - stage_id: 0
+    max_num_seqs: 2
+    gpu_memory_utilization: 0.68
+    # ~6.5 min of 1 FPS OmniInteract input (a 393 s video peaked at 31.1k);
+    # a 5 min session reaches ~24k.
+    max_model_len: 32000
+    # Reduction from 16384 reduces peak activation 2.56 -> 0.64 GiB; long prefills are chunked.
+    max_num_batched_tokens: 4096
+    # image > 0 builds the SigLIP tower that duplex video_frames use; the
+    # video bound limits start-up profiling. Replaces the base mapping.
+    limit_mm_per_prompt:
+      image: 1
+      video:
+        count: 1 # running at 1 FPS for now
+        num_frames: 32
+      audio: 64
+    hf_overrides:
+      # Capture batch sizes 1 and 2 (from max_sessions) instead of 1..32.
+      duplex_audio_encoder_cuda_graph_batch_sizes_from_sessions: true
+  - stage_id: 1
+    # The checkpoint's GPTQ metadata is global, but only llm.* is quantized.
+    hf_overrides:
+      quantization_config: null
+    max_num_seqs: 2
+    gpu_memory_utilization: 0.10
+    max_num_batched_tokens: 4096
+    default_sampling_params:
+      temperature: 0.8
+      repetition_penalty: 1.05
+      top_p: 1.0
+      top_k: -1
+  - stage_id: 2
+    max_num_seqs: 2
+    gpu_memory_utilization: 0.15
+
+platforms:
+  cuda:
+    stages:
+      - stage_id: 0
+        # Physical capacity is 144 KiB/token (36 layers x 8 KV heads x 128 x
+        # K/V x bf16), so 9 GiB = 4096 pages of 16 = 65,536 tokens, for two full
+        # 32000 sessions.
+        kv_cache_memory_bytes: 9663676416  # 9 GiB
+      - stage_id: 1
+        # Full-attention bound is max_num_seqs * max_model_len = 2 * 4096
+        # tokens; 0.5 GiB holds ~8736 (17472 measured at 1 GiB).
+        kv_cache_memory_bytes: 536870912  # 0.5 GiB

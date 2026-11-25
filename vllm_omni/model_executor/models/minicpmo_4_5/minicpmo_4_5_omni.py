@@ -63,10 +63,9 @@ def _duplex_row_outputs(request_infos: list[Any]) -> dict[str, Any]:
     prompt_rows = []
     for duplex_info in duplex_rows:
         prompt_token_ids = duplex_info.get("duplex_prompt_token_ids")
-        # This is a complete per-handoff snapshot, not a generated
-        # tensor delta. Keep it as row-local metadata so output
-        # accumulation replaces the previous value instead of
-        # attempting to concatenate variable-length prompts.
+        # The append's prompt tail (its last real token), re-sent whole on
+        # every step; the duplex plugin declares it a snapshot key so the
+        # frontend keeps only the latest value.
         prompt_rows.append(list(prompt_token_ids) if isinstance(prompt_token_ids, list) else None)
     if any(row is not None for row in prompt_rows):
         outputs["duplex_prompt_token_ids"] = prompt_rows
@@ -528,6 +527,7 @@ class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
                 return input_ids, embeds, {"duplex": {"prefill_success": False, "reason": str(exc)}}
             result = helper._stage_prefill_embeddings_only(state, audio_waveform, **prefill_kwargs)
         update_result = dict(result)
+        helper.trace_prompt(session_id, prefill_kwargs["epoch"], seq, prompt_len_meta, token_offset_meta, result)
         if result.get("stage0_window_replaced") is True:
             window = duplex.get("stage0_window", {})
             logger.info(
@@ -610,7 +610,9 @@ class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         if input_token_ids:
             # Pinned + non-blocking: a pageable copy would wait for all queued GPU work.
             req_input_ids = index_to_device(input_token_ids, input_ids.device, input_ids.dtype)
-            update_result["duplex_prompt_token_ids"] = full_input_token_ids
+            # llm2tts reads only the prompt's last token (folded boundary check),
+            # so the whole padded prompt is not sent on every step.
+            update_result["duplex_prompt_token_ids"] = full_input_token_ids[-1:]
         else:
             req_input_ids = torch.full_like(input_ids, helper._required_token_id("unit_token_id"))
         return req_input_ids, req_embeds, {"duplex": update_result}
@@ -891,10 +893,10 @@ class MiniCPMO45OmniForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         if model_intermediate_buffer and any(
             isinstance(info, dict) and info.get("duplex") for info in model_intermediate_buffer
         ):
-            # The prompt snapshot and special ids change only with an append,
-            # and the output accumulator keeps the last value of a missing key.
-            # Publish them on steps that complete an append's prefill instead
-            # of copying every row's whole prompt on every decode step.
+            # The prompt tail and special ids change only with an append. They
+            # are snapshot keys, so the accumulator keeps the last value when a
+            # step omits them; publish them only on steps that complete an
+            # append's prefill.
             num_reqs = int(input_batch.num_reqs)
             completes_prefill = input_batch.is_prefilling_np[:num_reqs] & (
                 input_batch.num_computed_prefill_tokens_np[:num_reqs] + input_batch.num_scheduled_tokens[:num_reqs]
