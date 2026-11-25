@@ -81,7 +81,7 @@ The build does the following:
 
 1. For each item in [`pilot/omniinteract_pilot.json`](pilot/omniinteract_pilot.json), it finds where the spoken question starts. fsmn-vad splits the audio into speech segments, Paraformer transcribes them, and the segment that best matches the annotated question (CER ≤ 0.5) gives the start time.
 2. It cuts the evidence as `[onset − 4 s, ⌊onset − 0.3 s⌋)`, so the original question is never streamed.
-3. It speaks the past-tense query with voice `vivian`, then checks it by transcribing the result (CER ≤ 0.15).
+3. It speaks the lag-neutral past-tense query (之前看到的…) with voice `vivian`, then checks it by transcribing the result (CER ≤ 0.15).
 4. It lays the query over a muted `1qna` cooking clip, which serves as the backdrop, and adds a silent 30 s answer tail.
 5. It cuts filler from the other `1q1a` clips. A filler run must be at least 30 s long and must avoid `[question_time − 5 s, question_time + 15 s]` around every annotated question.
 6. It writes the plans:
@@ -180,41 +180,53 @@ it is extracted, and deleted once its clips are cut.
 
 **OmniInteract `1q1a`** (942 questions: 638 realtime, 304 proactive):
 
-- **Onsets.** A question matches the speech segment whose transcript holds it
-  as a substring with CER ≤ 0.5. Its onset is the segment start. This matched
-  634 of 638 realtime questions, and all six pilot onsets reproduce.
-    - Δ = onset − annotated time: median −0.16 s, p05 −4.9 s, p95 +0.7 s.
-    - 185 items have Δ < −1.1 s. Most are "哦不，我想问的是…" corrections that VAD
-    merges with the question before them; the whole segment is cut.
-- **Room before the onset**, up to the previous question's answer + 5 s:
-    - 291 of 634 have none: they are nested inside another Q/A.
-    - 72 realtime questions are already about the past (刚刚…, 你还记不记得…).
-    Their evidence is not just before the onset, so they are excluded.
-- **Yield** (realtime, not interrupted, not recall-phrased, enough room for a
-  `W`-second evidence lookback): 167 items at W=2, 161 at W=4, 158 at W=8, from
-  91 clips. The room limits the yield, not `W`.
-- **Hand check** of 19 present-tense items from the 30-item sample, by eye on
-  8-frame contact sheets:
+- **Onsets.**
+    - VAD runs over `[question_time − 10 s, question_time + 8 s]`.
+    - A question matches the segment whose transcript holds it as a substring,
+      with CER ≤ 0.5. Its onset is the segment start. Merged speech before the
+      question (an announcement, an earlier question, "哦不，我想问的是…") is cut
+      with it.
+    - 634 of 638 realtime questions match, and all six pilot onsets reproduce.
+    - Δ = onset − annotated time: median −0.16 s, p05 −5.3 s, p95 +0.7 s.
+- **Realtime status:**
+
+  | Status | Items | Meaning |
+  | --- | --- | --- |
+  | `ok` | 552 | |
+  | `recall_phrased` | 66 | already about the past (刚刚…, 你还记不记得…); 前面 is spatial here and is not counted |
+  | `question_in_evidence` | 10 | the question, or a near-identical one, is also spoken inside the evidence window |
+  | `onset_censored` | 6 | the speech began before the search window |
+  | `no_onset_match` | 4 | |
+
+- **Room before the onset** runs back to the end of the previous question's
+  measured speech. The model's answers are not on the soundtrack: the text
+  that matched answers turned out to be questions echoing their wording.
+- **Yield** (`ok`, not interrupted, room ≥ W): 349 items at W=2, **298 at
+  W=4 (137 clips)**, 265 at W=8. W = 4 s is the chosen lookback. The
+  evidence ends exactly 0.3 s before the onset, so its last frame is at most
+  0.8 s before the question.
+- **Hand check** of 19 present-tense items, by eye on 8-frame contact sheets
+  (an earlier 8 s lookback):
     - 9 show the answer (4 of them only in the last 1–2 s before the onset)
     - 5 are marginal (small or blurred text or logos)
     - 5 don't show it
     - The VLM grounding step is still needed.
 
-**StreamArena** (877 HR items, 235 videos):
+**StreamArena** (877 HR items, 235 videos; `zh+en` videos count as English):
 
 - **Rule exclusions.** An item can hit several rules:
 
   | Rule | Items |
   | --- | --- |
-  | video language `zh+en` | 97 |
   | video language `other` | 7 |
   | evidence after `ask_sec` | 23 |
   | "so far" phrasing | 108 |
-  | "past N minutes" phrasing | 21 |
+  | "past N minutes" / "N minutes ago" phrasing | 22 |
 
-- **649 survive**: 610 zh and 39 en.
-    - 568 have one evidence window and 81 have several.
+- **731 survive**: 609 zh and 122 en.
+    - 48 use recency wording (刚才, "just now"), which is false at long lags. Their queries need a lag-neutral rewrite.
     - Evidence is 10 s at the median before subtitle extension. On the 14 fetched items it is 10–17 s after extension (median 15 s).
+    - Items with several evidence windows: 60 span more than 60 s from first to last window, so they cannot fit the context-60 validity window.
     - The LLM rules (residual relative phrasing, non-standalone) are not applied yet.
 - **Three fetched videos** gave 14 survivors.
     - The evidence-clip ASR holds the answer for the zh audio items (生日贺卡, 手风琴, 五种口味, 二十袋, 六十包).
@@ -263,6 +275,29 @@ python -m benchmarks.av_fd_longmem window-report m1-off
   31,589 tokens, and Stage 0 ends the request with `context_length_exceeded`
   at `max_model_len` 32000. The session fails and keeps no transcript.
 
+### Single-probe check of the lag grid (2026-11-25)
+
+A single-probe session is `filler 30 | evidence | filler G | query + 30 s tail`.
+It meets only the first compaction, at chunk 100, which drops the oldest ~37
+chunks. Item `0108` (sunglasses, 4 evidence chunks at 30–33, `basic`, greedy):
+
+```bash
+python -m benchmarks.av_fd_longmem single-plans --item oi-1q1a-0108-0 --lags 40 60
+python -m benchmarks.av_fd_longmem run $D/../single/single-oi-1q1a-0108-0-g40.json --run-id single-g40 ...
+python -m benchmarks.av_fd_longmem run $D/../single/single-oi-1q1a-0108-0-g60.json --run-id single-g60 ...
+```
+
+| G | Query onset | Label at onset | Compaction | Reply |
+| --- | --- | --- | --- | --- |
+| 40 | chunk 74 | in | chunk 100, drops chunks 0–37 | 168元 at 78.5 s: correct |
+| 60 | chunk 94 | in | chunk 100, drops chunks 0–37 | 168元 at 98.0 s: correct |
+
+- **G = 60 is the grid point (decision).** Residency is judged at the query
+  onset.
+- **The G = 60 margin is small.** The evidence was evicted 2 chunks after the
+  answer began. A longer query, longer evidence or slower answer can push the
+  eviction ahead of the reply.
+
 ## Output layout
 
 ```text
@@ -275,6 +310,9 @@ python -m benchmarks.av_fd_longmem window-report m1-off
     trace/                         server tick-trace files (duplex-ticks-*.jsonl), copied after each session
     labels.jsonl  verdicts.jsonl  summary.md
 ```
+
+The first pilot's plans and records (before the lag-neutral queries) are kept in
+`<dataset-root>/archive/pilot-v1/`.
 
 Plans contain clip references only. Every time inside a plan is a stream chunk
 index. A probe's gap is `query_onset_chunk − last evidence chunk − 1`.
@@ -307,7 +345,7 @@ Every verdict carries the reply text so it can be reviewed by hand. The plan's L
 
 ## Pilot results
 
-Results from 2026-11-25 on GPTQ, one session per server, `basic` window, greedy decoding. The pilot is a plumbing check, not a measurement: one item per lag and one run each.
+Results from 2026-11-25 on GPTQ, one session per server, `basic` window, greedy decoding. These runs used the first query wording (刚才…, "just now") and the floored evidence cut. Both have since changed, and the pilot plans have been rebuilt; the old plans are in `archive/pilot-v1/`. The pilot is a plumbing check, not a measurement: one item per lag and one run each.
 
 | Item | Lag (chunks) | Evidence at query | G=0 control (context-60) | Chained baseline reply | Verdict |
 | --- | --- | --- | --- | --- | --- |
