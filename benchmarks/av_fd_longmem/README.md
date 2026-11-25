@@ -345,6 +345,36 @@ Every verdict carries the reply text so it can be reviewed by hand. The plan's L
 
 ## Pilot results
 
+### Rerun with lag-neutral queries (2026-11-25, runs `pilot2-baseline`, `pilot2-controls-g0`)
+
+Same setup as below. Changes since the first run:
+
+- the queries are lag-neutral (之前看到的…)
+- the evidence ends exactly 0.3 s before the onset
+- the scorer reads spoken money amounts (2块9毛9 is 2.99)
+
+| Item | Lag (chunks) | Evidence at query | G=0 control (context-60) | Chained baseline reply | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| 0127 hotel name | 10 | in | correct (`Lavande丽枫酒店`) | `LAVANDE露枫酒店` | correct |
+| 0102 car / door | 30 | in | correct | `四车十三门` | correct |
+| 0108 sunglasses price | 60 | in | correct | `168元` | correct |
+| 0115 egg unit price | 180 | out | correct | `2块9毛9一颗` (invented) | incorrect |
+| 0130 hotline | 300 | out | **not perceived** (`四个零，九七八五八六`) | `400-6695-0036` (invented) | excluded |
+| 0124 toy price | 600 | out | correct (`629元`) | `15美元` (invented) | incorrect |
+
+- **Retention:** all 3 in-window probes are answered and none of the 2 valid
+  out-of-window ones. The model still invents an answer rather than abstaining.
+- **Validity flips against the first run:** 0124 is now perceived and 0130 is
+  not. That run's evidence for 0124 ended at 190 s, before 629 was legible
+  (≈190.9 s); this cut ends at 191.57 s. The 0130 control misreads the
+  number. One run each, so this flip is not attributed further.
+- **Answer channels:** text and ASR agree on 5 of 6 chained probes and 5 of 6
+  controls. The `Lavande` brand name is lost in the audio, as before.
+- **Health:** every session succeeded, with no epoch changes and no dropped
+  trace records. No determinism repeat was run this time.
+
+### First run (2026-11-25, runs `pilot-baseline-1`, `-2`, `pilot-controls-g0`)
+
 Results from 2026-11-25 on GPTQ, one session per server, `basic` window, greedy decoding. These runs used the first query wording (刚才…, "just now") and the floored evidence cut. Both have since changed, and the pilot plans have been rebuilt; the old plans are in `archive/pilot-v1/`. The pilot is a plumbing check, not a measurement: one item per lag and one run each.
 
 | Item | Lag (chunks) | Evidence at query | G=0 control (context-60) | Chained baseline reply | Verdict |

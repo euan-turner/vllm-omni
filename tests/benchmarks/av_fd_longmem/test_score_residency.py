@@ -74,6 +74,10 @@ def _probe(query_onset: int = 100) -> Probe:
         ("4号车13号门", "十四车十三门", False),
         ("400-097-8586", "四零零零九七八五八六", True),
         ("629元", "六百二十九元", True),
+        ("2元一颗", "我记得是2块9毛9一颗哦。", False),
+        ("2元一颗", "两元九角九分一颗", False),
+        ("2元一颗", "两块一颗", True),
+        ("2元一颗", "2块钱一颗", True),
     ],
 )
 def test_a_reply_is_correct_when_it_carries_an_answer_key(answer: str, reply: str, expected: bool) -> None:

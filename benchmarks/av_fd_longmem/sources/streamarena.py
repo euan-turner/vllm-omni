@@ -46,7 +46,9 @@ _RELATIVE_WINDOW = re.compile(
     re.IGNORECASE,
 )
 #: Recency wording that turns false once a long lag is inserted; such queries need a lag-neutral rewrite.
-_RECENCY = re.compile(r"刚才|刚刚|方才|\bjust now\b|\ba moment ago\b|\bjust (saw|seen|showed|shown|mentioned)\b", re.IGNORECASE)
+_RECENCY = re.compile(
+    r"刚才|刚刚|方才|\bjust now\b|\ba moment ago\b|\bjust (saw|seen|showed|shown|mentioned)\b", re.IGNORECASE
+)
 
 
 @dataclass(frozen=True)

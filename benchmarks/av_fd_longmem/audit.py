@@ -93,7 +93,9 @@ def _room(onset_s: float, index: int, spans: Sequence[tuple[float, float] | None
     return max(0.0, onset_s - oi.EVIDENCE_GUARD_S - bound)
 
 
-def _question_in_evidence(question_text: str, onset_s: float, match: oi.OnsetMatch, seen: Sequence[oi.SpeechSegment]) -> bool:
+def _question_in_evidence(
+    question_text: str, onset_s: float, match: oi.OnsetMatch, seen: Sequence[oi.SpeechSegment]
+) -> bool:
     """Whether another segment inside the ``EVIDENCE_LOOKBACK_S`` evidence window also holds the question."""
     window = oi.evidence_window(onset_s, lookback_s=oi.EVIDENCE_LOOKBACK_S)
     if window is None:
@@ -538,9 +540,7 @@ def build_handcheck(dataset_root: Path, omniinteract_root: Path, asr: FunasrSpee
         answer = oi.annotated_question(omniinteract_root, "1q1a", row.clip, row.qa_index).answer_text
         evidence = f"source s {start}-{end} (onset {row.onset_s}); frame k is source s {start} + k + 0.5"
         asr_text = asr.transcribe_samples(read_audio_f32(clip))
-        entries.append(
-            _handcheck_entry(item_id, row.question_text, answer, evidence, clip, chunks, asr_text, out_dir)
-        )
+        entries.append(_handcheck_entry(item_id, row.question_text, answer, evidence, clip, chunks, asr_text, out_dir))
     for report_path in sorted((dataset_root / "streamarena" / "audit").glob("*.json")):
         report = json.loads(report_path.read_text(encoding="utf-8"))
         for item in report.get("items", []):

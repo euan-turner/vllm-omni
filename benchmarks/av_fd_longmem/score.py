@@ -54,11 +54,18 @@ def _cn_number(run: str) -> str:
 
 
 _CN_DECIMAL_POINT = re.compile(r"(?<=\d)点(?=\d)")
+#: Spoken money: 2块9毛9 / 2元9角9分 -> 2.99. The tenths need 毛/角: in 两块九一颗 the 一 may mean "each".
+_SPOKEN_MONEY = re.compile(r"(\d+)(?:块|元)(\d)(?:毛|角)(?:(\d)分?)?")
 
 
 def chinese_numerals_to_digits(text: str) -> str:
-    """Chinese numerals as digits, with 点 between digits as a decimal point (两点九九 -> 2.99)."""
-    return _CN_DECIMAL_POINT.sub(".", _CN_NUMBER.sub(lambda match: _cn_number(match.group(0)), text))
+    """Chinese numerals as digits; 点 between digits and spoken money amounts become decimals.
+
+    两点九九 -> 2.99; 两块九毛九 -> 2.99 (not 两块九, which stays ambiguous). A decimal is one
+    digit group, so it never matches a whole-number key.
+    """
+    digits = _CN_DECIMAL_POINT.sub(".", _CN_NUMBER.sub(lambda match: _cn_number(match.group(0)), text))
+    return _SPOKEN_MONEY.sub(lambda m: f"{m.group(1)}.{m.group(2)}{m.group(3) or ''}", digits)
 
 
 @dataclass(frozen=True)

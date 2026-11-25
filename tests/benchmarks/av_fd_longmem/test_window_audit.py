@@ -127,7 +127,9 @@ def test_onset_statuses_and_room_bounded_by_other_questions_speech(tmp_path: Pat
 
     def segmenter(_samples, _rate, offset_s):
         end_s = offset_s + oi.ONSET_SEARCH_BEFORE_S + oi.ONSET_SEARCH_AFTER_S
-        return [oi.SpeechSegment(max(lo, offset_s), hi, text) for lo, hi, text in spoken if lo < end_s and offset_s < hi]
+        return [
+            oi.SpeechSegment(max(lo, offset_s), hi, text) for lo, hi, text in spoken if lo < end_s and offset_s < hi
+        ]
 
     out = audit.audit_clip(tmp_path, "1q1a", "0001", segmenter)
 

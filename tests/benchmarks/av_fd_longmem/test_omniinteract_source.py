@@ -113,7 +113,9 @@ def test_no_matching_segment_means_no_onset() -> None:
     ("onset_s", "expected"),
     [(8.64, (4.34, 4)), (217.86, (213.56, 4)), (2.42, (0.12, 2)), (262.3, (258.0, 4)), (0.5, None)],
 )
-def test_evidence_ends_just_before_the_onset_in_whole_seconds(onset_s: float, expected: tuple[float, int] | None) -> None:
+def test_evidence_ends_just_before_the_onset_in_whole_seconds(
+    onset_s: float, expected: tuple[float, int] | None
+) -> None:
     assert evidence_window(onset_s, lookback_s=4) == expected
 
 
