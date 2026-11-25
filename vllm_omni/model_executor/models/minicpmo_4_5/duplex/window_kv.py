@@ -935,6 +935,11 @@ class MiniCPMO45DuplexWorkerHelper:
                 session_state = helper.sessions.get(session_key) if session_key else None
                 if session_state is not None and hasattr(session_state, "window_units"):
                     if hasattr(helper, "_evict_window_units_for_reanchor"):
-                        helper._evict_window_units_for_reanchor(session_state, reanchor)
+                        helper._evict_window_units_for_reanchor(
+                            session_state,
+                            reanchor,
+                            epoch=duplex.get("epoch"),
+                            seq=duplex.get("seq"),
+                        )
                     else:
                         session_state.window_units.clear()

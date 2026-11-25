@@ -732,7 +732,7 @@ def test_worker_history_bounded_across_long_session_reanchors():
         def __init__(self):
             self.sessions = {"sess-1": session_state}
 
-        def _evict_window_units_for_reanchor(self, state, reanchor):
+        def _evict_window_units_for_reanchor(self, state, reanchor, *, epoch=None, seq=None):
             delta = int(reanchor.get("delta", 0) or 0)
             if delta <= 0 or not state.window_units:
                 return
@@ -1385,7 +1385,7 @@ def test_exactly_once_reanchor_across_metadata_refreshes():
                 )
             }
 
-        def _evict_window_units_for_reanchor(self, state, reanchor):
+        def _evict_window_units_for_reanchor(self, state, reanchor, *, epoch=None, seq=None):
             evicted_reanchors.append(reanchor)
 
     mock_helper = _MockHelper()
