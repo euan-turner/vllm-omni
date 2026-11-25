@@ -68,8 +68,8 @@ def _audio_args(chunks: int) -> list[str]:
             "-c:a", "aac", "-b:a", "96k"]  # fmt: skip
 
 
-def cut_source_clip(source: Path, start_s: int, chunks: int, out: Path) -> Path:
-    """``chunks`` seconds of ``source`` from ``start_s``, with its own audio (evidence and filler clips)."""
+def cut_source_clip(source: Path, start_s: float, chunks: int, out: Path) -> Path:
+    """``chunks`` seconds of ``source`` from ``start_s`` (may be fractional), with its own audio."""
     if start_s < 0 or chunks <= 0:
         raise ValueError(f"invalid span start={start_s} chunks={chunks}")
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -77,7 +77,7 @@ def cut_source_clip(source: Path, start_s: int, chunks: int, out: Path) -> Path:
         [
             "ffmpeg", "-loglevel", "error", "-y",
             "-ss", f"{start_s + 0.5:.3f}", "-t", str(chunks), "-i", str(source),
-            "-ss", str(start_s), "-t", str(chunks), "-i", str(source),
+            "-ss", f"{start_s:.3f}", "-t", str(chunks), "-i", str(source),
             "-map", "0:v:0", "-map", "1:a:0",
             *_video_args(chunks), *_audio_args(chunks),
             str(out),

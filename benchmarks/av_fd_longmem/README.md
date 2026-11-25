@@ -20,11 +20,16 @@ arrived.
 
 ## Status
 
-Only the **OmniInteract pilot** is implemented: six hand-picked Chinese
-(`1q1a`) items in one chained session, plus a validity control per item. Not
-yet implemented:
+Implemented:
 
-- StreamArena and the bulk OmniInteract dataset
+- the **OmniInteract pilot**: six hand-picked Chinese (`1q1a`) items in one
+  chained session, plus a validity control per item;
+- the **M0 data audit** of OmniInteract and StreamArena (see [M0](#m0-data-audit));
+- the **M1 window characterisation** (see [M1](#m1-window-characterisation)).
+
+Not yet implemented:
+
+- bulk item construction for StreamArena and OmniInteract
 - LLM rewriting and VLM grounding of items
 - the LLM judge
 - blind controls, proactive probes and modality ablations
@@ -38,13 +43,13 @@ The pilot scores answers by matching key tokens, a stand-in for the LLM judge
 - The repo's uv environment (`.venv`), plus these pinned dev dependencies:
 
   ```bash
-  uv pip install --python .venv/bin/python "funasr==1.3.29" "jiwer==4.0.0" "zhconv==1.4.3"
+  uv pip install --python .venv/bin/python "funasr==1.3.29" "jiwer==4.0.0" "zhconv==1.4.3" "zhon==2.1.1"
   ```
 
 - These models in the Hugging Face cache (`HF_HOME`):
-  - `openbmb/MiniCPM-o-4_5-GPTQ` at revision `02b54c54…`, the model under test
-  - `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`, for the spoken queries
-  - `funasr/fsmn-vad` and `funasr/paraformer-zh`, for question onsets and ASR; they download on first use
+    - `openbmb/MiniCPM-o-4_5-GPTQ` at revision `02b54c54…`, the model under test
+    - `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`, for the spoken queries
+    - `funasr/fsmn-vad` and `funasr/paraformer-zh`, for question onsets and ASR; they download on first use
 - OmniInteract extracted locally. Point `--omniinteract-root` at its `data/`
   directory, which holds `1q1a/` and `1qna/`.
 
@@ -117,7 +122,7 @@ wait
 Each session is configured from its plan's `condition`:
 
 | Plan | `sliding_window_mode` | Window size | Temperature |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Chained baseline | `basic` | 8000/6000 tokens, about 100 s | `0.0` (greedy) |
 | G=0 controls | `context` | `context_max_units: 60` | `0.0` (greedy) |
 
@@ -134,13 +139,129 @@ Use `--asr-device cpu` while the GPUs are still serving.
 Each run directory gets the following files:
 
 | File | Contents |
-|---|---|
+| --- | --- |
 | `labels.jsonl` | Whether each probe's evidence was in or out of the window at query onset |
 | `verdicts.jsonl` | One verdict per probe and answer channel |
 | `summary.md` | One row per probe |
 
 To check determinism, compare `sessions/pilot-chained/wav_transcript.json`
 between the two baseline runs.
+
+## M0 data audit
+
+The audit counts what survives each rule. It also measures the spoken-question
+onsets and clip sizes, and builds a hand-check sample. Outputs go under
+`<dataset-root>/{omniinteract,streamarena}/audit/` and
+`<dataset-root>/audit_handcheck/`.
+
+```bash
+# OmniInteract onsets: fsmn-vad + Paraformer on CPU (~10 min); segments are cached per clip
+python -m benchmarks.av_fd_longmem audit-omniinteract --omniinteract-root "$OI"
+
+# StreamArena: fetch the annotations at the pinned revision, then count exclusions.
+# --videos also materialises the evidence and filler clips of fetched, extracted tars.
+python -c "from huggingface_hub import hf_hub_download as d; import os
+for f in ['question.jsonl','question.en.jsonl','video_meta.jsonl','video_meta.en.jsonl','videos/videos_manifest.jsonl']:
+    d('hkuzxc/StreamArena', f, repo_type='dataset', revision='2960c360deba57b717a17ab66a3ae80f5358a6a3',
+      local_dir=os.path.expanduser('~/Documents/datasets/av_fd_longmem/streamarena/annotations'))"
+python -m benchmarks.av_fd_longmem audit-streamarena --raw-root <extracted-tars> --videos jvEuEu65YE8 p-PVprguijI j_ZPV10bu54
+
+# Query codec: TTS 25 zh + 25 en StreamArena questions, ASR them as WAV, AAC and FLAC (TTS server on GPU 1)
+python -m benchmarks.av_fd_longmem audit-codec --asr-device cuda:1
+
+# Hand-check page: 30 OmniInteract + the StreamArena evidence clips, with contact sheets and evidence ASR
+python -m benchmarks.av_fd_longmem audit-handcheck --omniinteract-root "$OI"
+```
+
+Each tar must be checked against its sha256 in `videos_manifest.jsonl` before
+it is extracted, and deleted once its clips are cut.
+
+### Results (2026-11-25)
+
+**OmniInteract `1q1a`** (942 questions: 638 realtime, 304 proactive):
+
+- **Onsets.** A question matches the speech segment whose transcript holds it
+  as a substring with CER ≤ 0.5. Its onset is the segment start. This matched
+  634 of 638 realtime questions, and all six pilot onsets reproduce.
+    - Δ = onset − annotated time: median −0.16 s, p05 −4.9 s, p95 +0.7 s.
+    - 185 items have Δ < −1.1 s. Most are "哦不，我想问的是…" corrections that VAD
+    merges with the question before them; the whole segment is cut.
+- **Room before the onset**, up to the previous question's answer + 5 s:
+    - 291 of 634 have none: they are nested inside another Q/A.
+    - 72 realtime questions are already about the past (刚刚…, 你还记不记得…).
+    Their evidence is not just before the onset, so they are excluded.
+- **Yield** (realtime, not interrupted, not recall-phrased, enough room for a
+  `W`-second evidence lookback): 167 items at W=2, 161 at W=4, 158 at W=8, from
+  91 clips. The room limits the yield, not `W`.
+- **Hand check** of 19 present-tense items from the 30-item sample, by eye on
+  8-frame contact sheets:
+    - 9 show the answer (4 of them only in the last 1–2 s before the onset)
+    - 5 are marginal (small or blurred text or logos)
+    - 5 don't show it
+    - The VLM grounding step is still needed.
+
+**StreamArena** (877 HR items, 235 videos):
+
+- **Rule exclusions.** An item can hit several rules:
+
+  | Rule | Items |
+  | --- | --- |
+  | video language `zh+en` | 97 |
+  | video language `other` | 7 |
+  | evidence after `ask_sec` | 23 |
+  | "so far" phrasing | 108 |
+  | "past N minutes" phrasing | 21 |
+
+- **649 survive**: 610 zh and 39 en.
+    - 568 have one evidence window and 81 have several.
+    - Evidence is 10 s at the median before subtitle extension. On the 14 fetched items it is 10–17 s after extension (median 15 s).
+    - The LLM rules (residual relative phrasing, non-standalone) are not applied yet.
+- **Three fetched videos** gave 14 survivors.
+    - The evidence-clip ASR holds the answer for the zh audio items (生日贺卡, 手风琴, 五种口味, 二十袋, 六十包).
+    - Screen-recording text, such as a GitHub star count, is not legible at 640 px.
+
+**Clips and codec:**
+
+- **Clip size:** 214 MB per hour for OmniInteract phone footage and 107–136 MB
+  per hour for StreamArena. A full StreamArena filler pool would be about 40 GB.
+- **StreamArena filler** (clear of every annotated time by 60 s): 35% of the
+  three videos' running time.
+- **Codec:** ASR error on the 50 spoken queries is the same for WAV, AAC and
+  FLAC. One English query does better with AAC. Clips keep AAC.
+
+## M1 window characterisation
+
+Each window mode streams filler only. The trace then shows how many chunks the
+Thinker's window holds.
+
+```bash
+python -m benchmarks.av_fd_longmem window-plans          # plans/m1/m1-basic.json (900 chunks), m1-off.json (600)
+# serve as in "Reproducing the pilot", step 2, then:
+python -m benchmarks.av_fd_longmem run $D/../m1/m1-basic.json --run-id m1-basic --base-url http://127.0.0.1:8099 \
+  --ref-audio "$REF" --trace-dir /tmp/trace_gpu0 --deploy-config $DEPLOY
+python -m benchmarks.av_fd_longmem run $D/../m1/m1-off.json --run-id m1-off --base-url http://127.0.0.1:8100 \
+  --ref-audio "$REF" --trace-dir /tmp/trace_gpu1 --deploy-config $DEPLOY
+python -m benchmarks.av_fd_longmem window-report m1-basic
+python -m benchmarks.av_fd_longmem window-report m1-off
+```
+
+`window-report` writes `window_report.json` (per chunk) and `window_summary.md` in the run directory.
+
+### Results (2026-11-25, GPTQ, greedy, OmniInteract filler)
+
+- **Tokens per chunk:** 79, made of 10 audio, 64 image and 5 marker tokens.
+- **`basic` (8000/6000 tokens):**
+    - The window compacts every 32 chunks.
+    - The resident span is a sawtooth from **100 chunks down to 69**; it was 63
+    at the first compaction.
+    - Evidence ending G chunks before the query is therefore always in the window
+    when `G + evidence chunks ≤ 69`, and always out when `G ≥ 100`. Between the
+    two, it depends on the phase.
+    - The model's own speech adds tokens: the pilot, which had answers, reached a
+    minimum span of 60.
+- **`off`:** the last unit is accepted at **chunk 398**. The prompt is then
+  31,589 tokens, and Stage 0 ends the request with `context_length_exceeded`
+  at `max_model_len` 32000. The session fails and keeps no transcript.
 
 ## Output layout
 
@@ -162,11 +283,11 @@ index. A probe's gap is `query_onset_chunk − last evidence chunk − 1`.
 
 - **Streaming.** [`runner.py`](runner.py) renders a plan into PCM and one JPEG per chunk ([`render.py`](render.py)). It then streams them with `vllm_omni.benchmarks.omniinteract.run_omniinteract_case`, the same code path as the OmniInteract serving benchmark. Audio goes out in 200 ms appends, and frame `k` travels with the append that crosses `k + 0.5 s`. The client acknowledges playback as it would in a live session. A session whose `epoch` ever changes is marked and skipped when scoring.
 - **Residency.** [`residency.py`](residency.py) works out whether each probe's evidence was still in the window at query onset:
-  - Stream chunk `c` is client appends `5c+1 … 5c+5`.
-  - Trace records link appends to Stage-0 units: `start` and `acc`, joined on the attempt number, give each unit's `seq`.
-  - The opt-in `ev` trace record logs every window drop by unit `seq`. Its format is documented in `vllm_omni/engine/duplex/tick_trace.py`.
-  - A probe is **in** the window if none of its evidence units has lost tokens before query onset. It is **out** if every evidence unit has lost everything except a sink residue of at most one KV block. Anything in between is **partial**.
-  - A trace containing `trace_dropped` is rejected, because a lost `ev` record would make evicted evidence look in-window.
+    - Stream chunk `c` is client appends `5c+1 … 5c+5`.
+    - Trace records link appends to Stage-0 units: `start` and `acc`, joined on the attempt number, give each unit's `seq`.
+    - The opt-in `ev` trace record logs every window drop by unit `seq`. Its format is documented in `vllm_omni/engine/duplex/tick_trace.py`.
+    - A probe is **in** the window if none of its evidence units has lost tokens before query onset. It is **out** if every evidence unit has lost everything except a sink residue of at most one KV block. Anything in between is **partial**.
+    - A trace containing `trace_dropped` is rejected, because a lost `ev` record would make evicted evidence look in-window.
 
 ### Scoring
 
@@ -189,7 +310,7 @@ Every verdict carries the reply text so it can be reviewed by hand. The plan's L
 Results from 2026-11-25 on GPTQ, one session per server, `basic` window, greedy decoding. The pilot is a plumbing check, not a measurement: one item per lag and one run each.
 
 | Item | Lag (chunks) | Evidence at query | G=0 control (context-60) | Chained baseline reply | Verdict |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | 0127 hotel name | 10 | in | correct (`Lavande丽帆酒店`) | `薰衣草酒店` ("Lavender hotel") | incorrect |
 | 0102 car / door | 30 | in | correct | `4车13门` | correct |
 | 0108 sunglasses price | 60 | in | correct | `168元` | correct |
@@ -202,7 +323,7 @@ Results from 2026-11-25 on GPTQ, one session per server, `basic` window, greedy 
 - **No abstention:** once the evidence is evicted, the model invents a confident answer rather than saying it doesn't know.
 - **Determinism:** the repeat run is token-identical. It gives the same 7 responses and the same Stage-0 token count in all 670 segments.
 - **Answer channels:** text and ASR agree on all six chained probes. They disagree on three of the six G=0 controls:
-  - `4车` is heard as `十四车`.
-  - The `Lavande` brand name is lost in the audio.
-  - The phone number is garbled in speech.
+    - `4车` is heard as `十四车`.
+    - The `Lavande` brand name is lost in the audio.
+    - The phone number is garbled in speech.
 - **Pilot health:** every probe got a residency label, there were no epoch changes, and no trace records were dropped.

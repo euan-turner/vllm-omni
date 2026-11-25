@@ -18,6 +18,7 @@ from benchmarks.av_fd_longmem.sources.omniinteract import (
     evidence_window,
     match_question_onset,
     parse_annotation_time,
+    substring_cer,
 )
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
@@ -63,6 +64,46 @@ def test_a_lead_in_and_asr_errors_still_match_and_move_the_onset_earlier() -> No
     assert 0 < match.cer <= 0.5
 
 
+def test_a_question_merged_with_other_speech_matches_and_its_segment_start_is_the_onset() -> None:
+    merged = SpeechSegment(217.06, 227.37, "前进方向左侧下车小心等一下第一个上车的是男的还是女的你跟我说一声")
+
+    match = match_question_onset("等下第一个上车的是男的还是女的跟我说一下", [merged])
+
+    assert match is not None
+    assert match.onset_s == 217.06
+    assert match.cer <= 0.5
+
+
+def test_a_repeated_question_takes_its_first_utterance() -> None:
+    segments = [
+        SpeechSegment(20.0, 22.0, "这个酒店是什么名字"),
+        SpeechSegment(10.0, 12.0, "这个酒店是什么名字"),
+    ]
+
+    match = match_question_onset("这个酒店是什么名字", segments)
+
+    assert match is not None
+    assert match.onset_s == 10.0
+
+
+def test_a_similar_earlier_question_does_not_take_the_onset() -> None:
+    segments = [
+        SpeechSegment(59.37, 62.8, "学府大道东站的上面一站是什么"),
+        SpeechSegment(62.8, 66.6, "哦不我要问的是学府大道东站的下面一站是什么"),
+    ]
+
+    match = match_question_onset("哦不，我要问的是学府大道东站的下面一站是什么", segments)
+
+    assert match is not None
+    assert match.onset_s == 62.8
+
+
+def test_substring_cer_ignores_speech_around_the_question() -> None:
+    assert substring_cer("几号车几号门", "前方到站几号车几号门请下车") == 0.0
+    assert substring_cer("几号车几号门", "几号车") == 0.5
+    assert substring_cer("几号车几号门", "") == 1.0
+
+
 def test_no_matching_segment_means_no_onset() -> None:
     assert match_question_onset("请问一下现在这个是几号车几号门", [SpeechSegment(1.0, 2.0, "他那边的人太多了")]) is None
     assert match_question_onset("请问一下现在这个是几号车几号门", []) is None
@@ -70,11 +111,9 @@ def test_no_matching_segment_means_no_onset() -> None:
 
 @pytest.mark.parametrize(
     ("onset_s", "expected"),
-    [(8.64, (4, 8)), (217.86, (213, 217)), (2.42, (0, 2)), (262.3, (258, 262)), (0.5, None)],
+    [(8.64, (4.34, 4)), (217.86, (213.56, 4)), (2.42, (0.12, 2)), (262.3, (258.0, 4)), (0.5, None)],
 )
-def test_evidence_ends_on_the_last_whole_second_before_the_onset(
-    onset_s: float, expected: tuple[int, int] | None
-) -> None:
+def test_evidence_ends_just_before_the_onset_in_whole_seconds(onset_s: float, expected: tuple[float, int] | None) -> None:
     assert evidence_window(onset_s, lookback_s=4) == expected
 
 

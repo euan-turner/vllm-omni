@@ -6,6 +6,13 @@ Stages:
 - ``build-pilot``: OmniInteract pilot items, filler and plans (needs a Qwen3-TTS server).
 - ``run``: stream plans against a deployed duplex server, one session at a time.
 - ``score``: residency labels, answer verdicts and a per-probe summary for a run.
+- ``single-plans``: single-probe retention plans for one built item at several lags.
+- ``audit-omniinteract``: M0 onset audit of an OmniInteract subset (onset match, offsets, pre-onset room).
+- ``audit-streamarena``: M0 StreamArena exclusion counts, plus evidence/filler clips of fetched videos.
+- ``audit-codec``: M0 ASR error of spoken queries as WAV vs AAC vs FLAC (needs a Qwen3-TTS server).
+- ``audit-handcheck``: M0 evidence hand-check sample (contact sheets + evidence ASR) for both sources.
+- ``window-plans``: M1 filler-only window plans, one per window mode.
+- ``window-report``: M1 window measurements (tokens per unit, eviction lag, resident span) for a run.
 
 External dependencies: see each stage's module.
 """
@@ -79,6 +86,125 @@ def _score(args: argparse.Namespace) -> int:
     return 0
 
 
+def _single_plans(args: argparse.Namespace) -> int:
+    from benchmarks.av_fd_longmem.pilot import PilotPaths, build_single_plans
+    from benchmarks.av_fd_longmem.schema import FillerClip, Item, read_jsonl
+
+    paths = PilotPaths(data_root=Path(), out_root=args.dataset_root)
+    items = list(read_jsonl(paths.source_root / "items.jsonl", Item))
+    filler = list(read_jsonl(paths.source_root / "filler.jsonl", FillerClip))
+    for plan in build_single_plans(paths, items, filler, item_id=args.item, lags=args.lags):
+        print(f"{plan.plan_id}: {plan.total_chunks} chunks, probes {[(p.item_id, p.gap_chunks) for p in plan.probes]}")
+    return 0
+
+
+def _audit_omniinteract(args: argparse.Namespace) -> int:
+    from benchmarks.av_fd_longmem.asr import FunasrSpeechSegmenter
+    from benchmarks.av_fd_longmem.audit import audit_subset, summarise_onsets
+
+    out_dir: Path = args.dataset_root / "omniinteract" / "audit" / args.subset
+    rows = audit_subset(args.omniinteract_root, args.subset, out_dir, FunasrSpeechSegmenter(device=args.asr_device))
+    summary = summarise_onsets(rows)
+    (out_dir / "onset_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _audit_streamarena(args: argparse.Namespace) -> int:
+    from benchmarks.av_fd_longmem.audit import materialise_streamarena_video, summarise_streamarena
+    from benchmarks.av_fd_longmem.sources.streamarena import recall_rows
+
+    source_root: Path = args.dataset_root / "streamarena"
+    annotations = source_root / "annotations"
+    out_dir = source_root / "audit"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rows = recall_rows(annotations)
+    summary = summarise_streamarena(rows)
+    for video_id in args.videos:
+        raw_dir = args.raw_root / video_id / video_id
+        report = materialise_streamarena_video(annotations, raw_dir, video_id, source_root, rows)
+        report_json = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+        (out_dir / f"{video_id}.json").write_text(report_json, encoding="utf-8")
+    summary["videos_materialised"] = []
+    for report_path in sorted(out_dir.glob("*.json")):
+        if report_path.name in {"summary.json", "codec.json"}:
+            continue
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        fields = ("video_id", "duration_s", "vtt_cues", "filler_clips", "filler_chunks", "filler_mb_per_hour")
+        summary["videos_materialised"].append({key: report[key] for key in fields} | {"items": len(report["items"])})
+    (out_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _audit_codec(args: argparse.Namespace) -> int:
+    import os
+
+    os.environ.setdefault("SEED_TTS_EVAL_DEVICE", args.asr_device)
+    import zhconv
+
+    from benchmarks.av_fd_longmem.asr import FunasrSpeechSegmenter
+    from benchmarks.av_fd_longmem.audit import query_codec_check
+    from benchmarks.av_fd_longmem.sources.streamarena import exclusion_reasons, recall_rows
+    from vllm_omni.benchmarks.data_modules.seed_tts_eval import _transcribe_en_f32_16k
+
+    source_root: Path = args.dataset_root / "streamarena"
+    survivors = [r for r in recall_rows(source_root / "annotations") if not exclusion_reasons(r)]
+    queries = [("zh", r.question) for r in survivors if r.item_lang == "zh"][: args.per_lang]
+    queries += [("en", r.question) for r in survivors if r.item_lang == "en"][: args.per_lang]
+    paraformer = FunasrSpeechSegmenter(device=args.asr_device)
+    transcribers = {
+        "zh": lambda wav: zhconv.convert(paraformer.transcribe_samples(wav), "zh-cn"),
+        "en": _transcribe_en_f32_16k,
+    }
+    out_dir = source_root / "audit"
+    report = query_codec_check(queries, tts_url=args.tts_url, work_dir=source_root / "work" / "codec",
+                               transcribers=transcribers)  # fmt: skip
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "codec.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps({k: v for k, v in report.items() if k != "rows"}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _audit_handcheck(args: argparse.Namespace) -> int:
+    from benchmarks.av_fd_longmem.asr import FunasrSpeechSegmenter
+    from benchmarks.av_fd_longmem.audit import build_handcheck
+
+    page = build_handcheck(
+        args.dataset_root, args.omniinteract_root, FunasrSpeechSegmenter(device=args.asr_device), n=args.n
+    )
+    print(page)
+    return 0
+
+
+def _window_plans(args: argparse.Namespace) -> int:
+    from benchmarks.av_fd_longmem.schema import FillerClip, read_jsonl, write_json
+    from benchmarks.av_fd_longmem.window import window_plans
+
+    filler = list(read_jsonl(args.dataset_root / args.source / "filler.jsonl", FillerClip))
+    for plan in window_plans(filler):
+        path = args.dataset_root / "plans" / "m1" / f"{plan.plan_id}.json"
+        write_json(path, plan)
+        print(f"{path}: {plan.total_chunks} chunks, {plan.condition}")
+    return 0
+
+
+def _window_report(args: argparse.Namespace) -> int:
+    from benchmarks.av_fd_longmem.window import summary_markdown, window_report
+
+    run_dir: Path = args.dataset_root / "runs" / args.run_id
+    reports = [
+        window_report(path.parent, run_dir / "trace") for path in sorted(run_dir.glob("sessions/*/session.json"))
+    ]
+    (run_dir / "window_report.json").write_text(json.dumps(reports, ensure_ascii=False) + "\n", encoding="utf-8")
+    summary = "\n".join(summary_markdown(report) for report in reports)
+    (run_dir / "window_summary.md").write_text(summary, encoding="utf-8")
+    print(summary)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m benchmarks.av_fd_longmem", description=__doc__.split("\n\n")[0])
     parser.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT)
@@ -107,6 +233,42 @@ def main(argv: list[str] | None = None) -> int:
     score.add_argument("run_ids", nargs="+")
     score.add_argument("--asr-device", default="cuda:1")
     score.set_defaults(handler=_score)
+
+    single = stages.add_parser("single-plans", help="Single-probe retention plans for one item at several lags.")
+    single.add_argument("--item", required=True, help="item_id from omniinteract/items.jsonl")
+    single.add_argument("--lags", type=int, nargs="+", required=True, help="Gaps G in chunks.")
+    single.set_defaults(handler=_single_plans)
+
+    audit = stages.add_parser("audit-omniinteract", help="M0 onset audit of an OmniInteract subset.")
+    audit.add_argument("--omniinteract-root", type=Path, required=True, help="OmniInteract `data` directory.")
+    audit.add_argument("--subset", default="1q1a")
+    audit.add_argument("--asr-device", default="cpu")
+    audit.set_defaults(handler=_audit_omniinteract)
+
+    sa_audit = stages.add_parser("audit-streamarena", help="M0 StreamArena exclusion counts and clip sample.")
+    sa_audit.add_argument("--raw-root", type=Path, help="Directory of extracted tars, <root>/<video_id>/<video_id>/.")
+    sa_audit.add_argument("--videos", nargs="*", default=[], help="Fetched video ids to materialise.")
+    sa_audit.set_defaults(handler=_audit_streamarena)
+
+    codec = stages.add_parser("audit-codec", help="M0 query ASR error as WAV vs AAC vs FLAC.")
+    codec.add_argument("--tts-url", default="http://127.0.0.1:8091")
+    codec.add_argument("--asr-device", default="cuda:1")
+    codec.add_argument("--per-lang", type=int, default=25, help="StreamArena survivor questions per language.")
+    codec.set_defaults(handler=_audit_codec)
+
+    hand = stages.add_parser("audit-handcheck", help="M0 evidence hand-check sample for both sources.")
+    hand.add_argument("--omniinteract-root", type=Path, required=True, help="OmniInteract `data` directory.")
+    hand.add_argument("--n", type=int, default=30, help="OmniInteract items in the sample.")
+    hand.add_argument("--asr-device", default="cpu")
+    hand.set_defaults(handler=_audit_handcheck)
+
+    plans = stages.add_parser("window-plans", help="Write the M1 filler-only window plans.")
+    plans.add_argument("--source", default="omniinteract", help="Source whose filler.jsonl supplies the filler.")
+    plans.set_defaults(handler=_window_plans)
+
+    report = stages.add_parser("window-report", help="M1 window measurements for a finished run.")
+    report.add_argument("run_id")
+    report.set_defaults(handler=_window_report)
 
     args = parser.parse_args(argv)
     return args.handler(args)

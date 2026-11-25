@@ -37,7 +37,6 @@ from benchmarks.av_fd_longmem.sources import omniinteract as oi
 from benchmarks.av_fd_longmem.tts import synthesise
 
 PILOT_SPEC = Path(__file__).parent / "pilot" / "omniinteract_pilot.json"
-EVIDENCE_LOOKBACK_S = 4
 ANSWER_TAIL_CHUNKS = 30
 FILLER_EXCLUDE_BEFORE_S = 5.0
 FILLER_EXCLUDE_AFTER_S = 15.0
@@ -81,19 +80,15 @@ def build_items(paths: PilotPaths, *, tts_url: str, segmenter: FunasrSpeechSegme
         item_id = f"oi-{subset}-{clip}-{qa_index}"
         question = oi.annotated_question(paths.data_root, subset, clip, qa_index)
         video = oi.video_path(paths.data_root, subset, clip)
-        search_start = max(0.0, question.question_time_s - oi.ONSET_SEARCH_BEFORE_S)
-        samples = read_audio_f32(video)
-        window = samples[
-            int(search_start * SAMPLE_RATE) : int((question.question_time_s + oi.ONSET_SEARCH_AFTER_S) * SAMPLE_RATE)
-        ]
-        onset = oi.match_question_onset(question.question_text, segmenter(window, SAMPLE_RATE, search_start))
+        onset, _segments = oi.find_question_onset(question, read_audio_f32(video), SAMPLE_RATE, segmenter)
         if onset is None:
             raise ValueError(f"{item_id}: no speech segment matches the annotated question")
-        span = oi.evidence_window(onset.onset_s, lookback_s=EVIDENCE_LOOKBACK_S)
+        span = oi.evidence_window(onset.onset_s, lookback_s=oi.EVIDENCE_LOOKBACK_S)
         if span is None:
             raise ValueError(f"{item_id}: onset {onset.onset_s:.2f}s leaves no evidence")
+        evidence_start, evidence_chunks = span
         evidence = materialise.cut_source_clip(
-            video, span[0], span[1] - span[0], root / "clips" / "evidence" / f"{item_id}__e0.mp4"
+            video, evidence_start, evidence_chunks, root / "clips" / "evidence" / f"{item_id}__e0.mp4"
         )
         spoken = synthesise(
             str(entry["query_text"]),
@@ -114,7 +109,7 @@ def build_items(paths: PilotPaths, *, tts_url: str, segmenter: FunasrSpeechSegme
                 source="omniinteract",
                 lang=lang,
                 clips=ItemClips(
-                    evidence=[ClipRef(path=_rel(evidence, paths.out_root), chunks=span[1] - span[0])],
+                    evidence=[ClipRef(path=_rel(evidence, paths.out_root), chunks=evidence_chunks)],
                     query=QueryClip(
                         path=_rel(query, paths.out_root),
                         chunks=query_chunks,
@@ -134,7 +129,7 @@ def build_items(paths: PilotPaths, *, tts_url: str, segmenter: FunasrSpeechSegme
                     "onset_s": onset.onset_s,
                     "onset_transcript": onset.segment.text,
                     "onset_cer": onset.cer,
-                    "evidence_source_s": list(span),
+                    "evidence_source_s": [evidence_start, evidence_start + evidence_chunks],
                     "backdrop": str(backdrop.relative_to(paths.data_root)),
                     "backdrop_start_s": BACKDROP_START_S,
                     "tts": {
@@ -227,4 +222,24 @@ def build_plans(paths: PilotPaths, items: list[Item], filler: list[FillerClip]) 
         plans.append(replace(control, kind="control_g0"))
     for plan in plans:
         write_json(paths.plans_root / f"{plan.plan_id}.json", plan)
+    return plans
+
+
+def build_single_plans(
+    paths: PilotPaths, items: list[Item], filler: list[FillerClip], *, item_id: str, lags: list[int]
+) -> list[SessionPlan]:
+    """One single-probe retention plan per lag for ``item_id``: filler prefix, evidence, filler(G), query.
+
+    Every plan draws the same filler order, so the plans differ only in the gap.
+    Written to ``plans/single/single-<item_id>-g<G>.json`` (``basic`` window, greedy).
+    """
+    item = next((i for i in items if i.item_id == item_id), None)
+    if item is None:
+        raise ValueError(f"{item_id} is not in items.jsonl")
+    plans = []
+    for lag in lags:
+        plan = plan_chained(f"single-{item_id}-g{lag}", [PlannedProbe(item, lag)], filler, condition=WINDOW_CONDITION)
+        plan = replace(plan, kind="single")
+        write_json(paths.out_root / "plans" / "single" / f"{plan.plan_id}.json", plan)
+        plans.append(plan)
     return plans
