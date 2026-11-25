@@ -90,6 +90,8 @@ class OmniInteractBenchmarkConfig:
     #: ``server_vad`` lets the server cut the soundtrack into turns.
     turn_detection: str = TURN_DETECTION_NONE
     instructions: str | None = None
+    #: Session sampling temperature; ``None`` leaves the model plugin's default.
+    temperature: float | None = None
 
 
 @dataclass
@@ -981,6 +983,7 @@ class _RealtimeSession:
             self.session_config = SessionConfig(
                 ref_audio=reference_audio,
                 instructions=config.instructions,
+                temperature=config.temperature,
                 overlap_policy="listen_only",
                 playback_commit_policy="ack_only",
                 idle_timeout_s=float(config.timeout_s),
@@ -995,6 +998,7 @@ class _RealtimeSession:
             self.session_config = SessionConfig(
                 ref_audio=reference_audio,
                 instructions=config.instructions,
+                temperature=config.temperature,
                 auto_response=False,
                 turn_detection=turn_detection,
                 playback_commit_policy="ack_only",

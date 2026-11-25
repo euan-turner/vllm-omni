@@ -1451,3 +1451,17 @@ def test_whole_benchmark_lock_serializes_a_shared_output_root(tmp_path: Path, mo
         release.set()
         assert first.result() == second.result() == {"total": 1}
     assert calls == [0, 1]
+
+
+@pytest.mark.parametrize("turn_detection", [oi.TURN_DETECTION_NONE, "server_vad"])
+@pytest.mark.parametrize("temperature", [None, 0.0])
+def test_the_session_config_carries_the_configured_temperature(
+    tmp_path: Path, turn_detection: str, temperature: float | None
+) -> None:
+    config = oi.OmniInteractBenchmarkConfig(
+        model=MODEL, output_root=tmp_path / "out", turn_detection=turn_detection, temperature=temperature
+    )
+
+    session = oi._RealtimeSession(config, None)
+
+    assert session.session_config.temperature == temperature
