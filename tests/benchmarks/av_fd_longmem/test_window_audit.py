@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
-"""M1 window analysis from a synthetic tick trace; M0 onset room and StreamArena rules, windows and filler.
+"""M1 window analysis from a synthetic tick trace; M0 onset room and StreamArena rules, windows, filler and fetch.
 
-External dependencies: none (speech segmentation is faked).
+External dependencies: none (speech segmentation and the Hugging Face download are faked).
 """
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -214,3 +217,57 @@ def test_vtt_cues_are_parsed(tmp_path: Path) -> None:
     vtt.write_text("WEBVTT\n\n1\n00:00:16.000 --> 00:00:24.000\n文字\n\n00:01:01.550 --> 00:01:01.560 align:start\nx\n")
 
     assert sa.vtt_cues([vtt]) == [(16.0, 24.0), (61.55, 61.56)]
+
+
+def _fake_tar(tmp_path: Path, members: dict[str, bytes]) -> Path:
+    path = tmp_path / "upstream.tar"
+    with tarfile.open(path, "w") as archive:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    return path
+
+
+def _fetch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tar: Path, sha256: str) -> Path:
+    import huggingface_hub
+
+    annotations = tmp_path / "annotations"
+    (annotations / "videos").mkdir(parents=True)
+    row = {"video_id": "vid", "tar": "vid.tar", "sha256": sha256}
+    (annotations / "videos" / "videos_manifest.jsonl").write_text(json.dumps(row) + "\n")
+    calls = []
+
+    def download(repo_id: str, filename: str, **kwargs) -> str:
+        calls.append((repo_id, filename, kwargs["revision"]))
+        return str(tar)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+    raw_dir = audit.fetch_streamarena_video(annotations, "vid", tmp_path / "work")
+    assert calls == [(sa.REPO_ID, "videos/vid.tar", sa.REVISION)]
+    return raw_dir
+
+
+def test_fetch_streamarena_video_verifies_the_manifest_sha256_and_extracts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tar = _fake_tar(tmp_path, {"vid/vid.mp4": b"mp4", "vid/vid.en.vtt": b"WEBVTT"})
+
+    raw_dir = _fetch(tmp_path, monkeypatch, tar, hashlib.sha256(tar.read_bytes()).hexdigest())
+
+    assert sorted(p.name for p in raw_dir.iterdir()) == ["vid.en.vtt", "vid.mp4"]
+
+
+def test_fetch_streamarena_video_rejects_a_sha256_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tar = _fake_tar(tmp_path, {"vid/vid.mp4": b"mp4"})
+
+    with pytest.raises(ValueError, match="sha256"):
+        _fetch(tmp_path, monkeypatch, tar, "0" * 64)
+    assert not (tmp_path / "work" / "raw").exists()
+
+
+def test_fetch_streamarena_video_rejects_an_unexpected_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tar = _fake_tar(tmp_path, {"vid.mp4": b"mp4"})
+
+    with pytest.raises(ValueError, match="does not hold"):
+        _fetch(tmp_path, monkeypatch, tar, hashlib.sha256(tar.read_bytes()).hexdigest())

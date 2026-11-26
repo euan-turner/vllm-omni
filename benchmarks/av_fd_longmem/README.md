@@ -349,10 +349,33 @@ CUDA_VISIBLE_DEVICES=1 vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
 
 ### Building the set
 
-1. **StreamArena videos.** Fetch and cut the videos with `audit-streamarena`
-   (see [M0](#m0-data-audit)). M3 uses the three M0 videos plus two English
-   ones: `H3KnMyojEQU` (launch event) and `J7eS9BRw2Y8` (animation). The extra
-   two give English items filler in their own language from another domain.
+1. **StreamArena videos.** `fetch-streamarena` downloads each listed video's
+   tar at the pinned revision, checks it against the manifest sha256, extracts
+   it, cuts its evidence and filler clips (as `audit-streamarena` does) and
+   deletes the tar and the extracted files before the next video. Videos that
+   already have an `audit/<video_id>.json` report are skipped, so the stage
+   resumes. It needs the annotations fetched first (see [M0](#m0-data-audit)).
+
+   ```bash
+   python -m benchmarks.av_fd_longmem fetch-streamarena --work-root /path/to/scratch
+   ```
+
+   The default list is [`sets/streamarena_m4_videos.json`](sets/streamarena_m4_videos.json):
+   50 videos by stratum. The 45 added for M4 were about 65 GB to download;
+   8.2 GB of clips are kept for all 50.
+   - **M3** used the three M0 videos plus two English ones, `H3KnMyojEQU`
+     (launch event) and `J7eS9BRw2Y8` (animation). They give English items
+     filler in their own language from another domain.
+   - **M4** adds:
+     - `en`: every other video with a single-window rule survivor (16 in all)
+     - `zh+en`: all 24 videos with a single-window rule survivor
+     - `zh`: 8 more videos, one per `L1` domain and two for film (影视). Each
+       is the video with the most single-window survivors per GB of tar, among
+       those with subtitles. With the two M0 videos that makes 10 videos and
+       51 items.
+
+   The `typos` pre-commit hook skips `sets/*.json`, because it "corrects"
+   video ids into English words.
 2. **Annotate** (LLM and VLM servers):
 
    ```bash

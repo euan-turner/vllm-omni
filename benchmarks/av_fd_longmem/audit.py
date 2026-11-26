@@ -21,21 +21,25 @@ audit resumes and matching can change without ASR; rows go to ``onsets.jsonl``.
 offset distribution and the item yield per candidate ``W``.
 
 StreamArena: ``summarise_streamarena`` counts the rule-based exclusions over
-all HR rows; ``materialise_streamarena_video`` cuts the evidence and filler
-clips of one fetched video and measures their size.
+all HR rows; ``fetch_streamarena_video`` downloads one video's tar at the pinned
+revision, checks it against the manifest sha256 and extracts it;
+``materialise_streamarena_video`` cuts the evidence and filler clips of one
+fetched video and measures their size.
 
 Query codec: ``query_codec_check`` compares ASR error on spoken queries as
 synthesised, after the clip AAC encode and after a lossless FLAC encode.
 
 Design: plan §0 and §8 M0 (``~/.claude/plans/we-previously-worked-on-wiggly-octopus-…md``).
-External dependencies: a speech segmenter (``asr.FunasrSpeechSegmenter``); ffmpeg and ffprobe; for the
-codec check a Qwen3-TTS server, Paraformer-zh and Whisper-large-v3 (``seed_tts_eval``).
+External dependencies: huggingface_hub (StreamArena tars); a speech segmenter (``asr.FunasrSpeechSegmenter``);
+ffmpeg and ffprobe; for the codec check a Qwen3-TTS server, Paraformer-zh and Whisper-large-v3 (``seed_tts_eval``).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import statistics
+import tarfile
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
@@ -309,6 +313,41 @@ def summarise_streamarena(rows: Sequence[sa.RecallRow]) -> dict[str, object]:
         ),
         "not_implemented": ["llm_relative_window_phrasing", "llm_non_standalone", "present_referent_tag"],
     }
+
+
+def fetch_streamarena_video(annotations: Path, video_id: str, work_dir: Path) -> Path:
+    """Download, verify and extract one StreamArena video tar; returns the directory holding ``<video_id>.mp4``.
+
+    The tar is fetched at ``sources.streamarena.REVISION`` into ``work_dir/dl``, its
+    sha256 is checked against ``videos/videos_manifest.jsonl`` and it is extracted
+    with tarfile's ``data`` filter into ``work_dir/raw``. The caller deletes ``work_dir``.
+    """
+    from huggingface_hub import hf_hub_download
+
+    manifest = {
+        row["video_id"]: row
+        for row in map(json.loads, (annotations / "videos" / "videos_manifest.jsonl").read_text().splitlines())
+    }
+    entry = manifest[video_id]
+    tar_path = Path(
+        hf_hub_download(
+            sa.REPO_ID, f"videos/{entry['tar']}", repo_type="dataset", revision=sa.REVISION, local_dir=work_dir / "dl"
+        )
+    )
+    digest = hashlib.sha256()
+    with tar_path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 22), b""):
+            digest.update(block)
+    if digest.hexdigest() != entry["sha256"]:
+        raise ValueError(f"{video_id}: sha256 {digest.hexdigest()} does not match the manifest")
+    target = work_dir / "raw" / video_id
+    target.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(tar_path) as archive:
+        archive.extractall(target, filter="data")
+    raw_dir = target / video_id
+    if not (raw_dir / f"{video_id}.mp4").exists():
+        raise ValueError(f"{video_id}: tar does not hold {video_id}/{video_id}.mp4")
+    return raw_dir
 
 
 def materialise_streamarena_video(

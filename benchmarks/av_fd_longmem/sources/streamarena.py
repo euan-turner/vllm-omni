@@ -25,6 +25,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+REPO_ID = "hkuzxc/StreamArena"
 REVISION = "2960c360deba57b717a17ab66a3ae80f5358a6a3"
 EVIDENCE_HALF_WIDTH_S = 5.0
 EVIDENCE_MAX_HALF_WIDTH_S = 15.0

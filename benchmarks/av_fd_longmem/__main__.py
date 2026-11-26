@@ -9,6 +9,7 @@ Stages:
 - ``single-plans``: single-probe retention plans for one built item at several lags.
 - ``audit-omniinteract``: M0 onset audit of an OmniInteract subset (onset match, offsets, pre-onset room).
 - ``audit-streamarena``: M0 StreamArena exclusion counts, plus evidence/filler clips of fetched videos.
+- ``fetch-streamarena``: download, verify and materialise a list of StreamArena videos, one tar at a time.
 - ``audit-codec``: M0 ASR error of spoken queries as WAV vs AAC vs FLAC (needs a Qwen3-TTS server).
 - ``audit-handcheck``: M0 evidence hand-check sample (contact sheets + evidence ASR) for both sources.
 - ``window-plans``: M1 filler-only window plans, one per window mode.
@@ -135,7 +136,8 @@ def _audit_omniinteract(args: argparse.Namespace) -> int:
     return 0
 
 
-def _audit_streamarena(args: argparse.Namespace) -> int:
+def _materialise_streamarena(args: argparse.Namespace, video_raw_dirs: dict[str, Path]) -> dict[str, object]:
+    """Cut each video's clips, write its ``audit/<video_id>.json`` report and rewrite ``audit/summary.json``."""
     from benchmarks.av_fd_longmem.audit import materialise_streamarena_video, summarise_streamarena
     from benchmarks.av_fd_longmem.sources.streamarena import recall_rows
 
@@ -145,8 +147,7 @@ def _audit_streamarena(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     rows = recall_rows(annotations)
     summary = summarise_streamarena(rows)
-    for video_id in args.videos:
-        raw_dir = args.raw_root / video_id / video_id
+    for video_id, raw_dir in video_raw_dirs.items():
         report = materialise_streamarena_video(annotations, raw_dir, video_id, source_root, rows)
         report_json = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
         (out_dir / f"{video_id}.json").write_text(report_json, encoding="utf-8")
@@ -158,7 +159,37 @@ def _audit_streamarena(args: argparse.Namespace) -> int:
         fields = ("video_id", "duration_s", "vtt_cues", "filler_clips", "filler_chunks", "filler_mb_per_hour")
         summary["videos_materialised"].append({key: report[key] for key in fields} | {"items": len(report["items"])})
     (out_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return summary
+
+
+def _audit_streamarena(args: argparse.Namespace) -> int:
+    summary = _materialise_streamarena(args, {v: args.raw_root / v / v for v in args.videos})
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _fetch_streamarena(args: argparse.Namespace) -> int:
+    import shutil
+    import tempfile
+
+    from benchmarks.av_fd_longmem.audit import fetch_streamarena_video
+
+    groups = json.loads(args.videos_file.read_text(encoding="utf-8"))
+    audit_dir = args.dataset_root / "streamarena" / "audit"
+    for stratum, video_ids in groups.items():
+        for video_id in video_ids:
+            if (audit_dir / f"{video_id}.json").exists():
+                print(f"{video_id} ({stratum}): already materialised")
+                continue
+            args.work_root.mkdir(parents=True, exist_ok=True)
+            work_dir = Path(tempfile.mkdtemp(prefix=f"{video_id}-", dir=args.work_root))
+            try:
+                raw_dir = fetch_streamarena_video(args.dataset_root / "streamarena" / "annotations", video_id, work_dir)
+                _materialise_streamarena(args, {video_id: raw_dir})
+            finally:
+                shutil.rmtree(work_dir)
+            report = json.loads((audit_dir / f"{video_id}.json").read_text(encoding="utf-8"))
+            print(f"{video_id} ({stratum}): {len(report['items'])} items, {report['filler_clips']} filler clips")
     return 0
 
 
@@ -348,6 +379,20 @@ def main(argv: list[str] | None = None) -> int:
     sa_audit.add_argument("--raw-root", type=Path, help="Directory of extracted tars, <root>/<video_id>/<video_id>/.")
     sa_audit.add_argument("--videos", nargs="*", default=[], help="Fetched video ids to materialise.")
     sa_audit.set_defaults(handler=_audit_streamarena)
+
+    fetch = stages.add_parser(
+        "fetch-streamarena", help="Fetch, verify and materialise StreamArena videos, deleting each raw tar after."
+    )
+    fetch.add_argument(
+        "--videos-file",
+        type=Path,
+        default=REPO_ROOT / "benchmarks" / "av_fd_longmem" / "sets" / "streamarena_m4_videos.json",
+        help="JSON object: stratum -> list of video ids.",
+    )
+    fetch.add_argument(
+        "--work-root", type=Path, required=True, help="Scratch directory for one tar and its extraction at a time."
+    )
+    fetch.set_defaults(handler=_fetch_streamarena)
 
     codec = stages.add_parser("audit-codec", help="M0 query ASR error as WAV vs AAC vs FLAC.")
     codec.add_argument("--tts-url", default="http://127.0.0.1:8091")
