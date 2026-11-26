@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
-"""Key-token scoring and evidence residency from a synthetic duplex tick trace.
+"""Key-token scoring, the run summary and evidence residency from a synthetic duplex tick trace.
 
 External dependencies: zhconv.
 """
@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from benchmarks.av_fd_longmem.evaluate import _summary_markdown
 from benchmarks.av_fd_longmem.residency import (
     TraceRejectedError,
     append_chunk,
@@ -194,3 +195,21 @@ def test_a_trace_with_dropped_records_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(TraceRejectedError):
         load_session_trace(tmp_path, SESSION)
+
+
+def test_summary_leads_with_the_llm_verdict_and_lists_scorer_disagreements() -> None:
+    row = {"plan_id": "p", "kind": "control_g0", "item_id": "i", "gap": 0, "residency": "in", "evicted_frac": 0.0,
+           "rehearsed": False, "reply": "粉色的花", "answer": "主色调是粉色"}  # fmt: skip
+    rows = [
+        row | {"transcript": "incorrect", "asr": "correct", "llm_transcript": True, "llm_asr": True},
+        row | {"plan_id": "q", "transcript": "correct", "asr": "silent", "llm_transcript": True, "llm_asr": None},
+    ]
+
+    summary = _summary_markdown("r", rows, llm_primary=True)
+    table, disagreements = summary.split("## Scorer disagreements")
+
+    assert "| correct / correct | incorrect / correct |" in table
+    assert disagreements.count("\n| p |") == 1 and "| p | transcript | correct | incorrect |" in disagreements
+    assert "| q |" not in disagreements
+    assert "Primary verdict: LLM match" in table
+    assert "Primary verdict: key-token" in _summary_markdown("r", rows, llm_primary=False)

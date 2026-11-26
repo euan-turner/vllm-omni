@@ -11,8 +11,13 @@ lists one row per probe, with the plan kind. Sessions with an epoch change or a
 rejected trace are reported and skipped.
 
 With an ``llm_match`` callable, each non-silent reply also gets an LLM verdict
-(``annotate.answers_match``): an uncalibrated stand-in for the plan's judge
-(M5), recorded next to the key-token verdict, which stays the primary one.
+(``annotate.answers_match``). From M4 that verdict is the primary one and the
+key-token verdict is secondary (decision 2026-11-26): ``summary.md`` lists the
+LLM verdict first and every channel where the two disagree, for review by ear.
+It is still uncalibrated (one call, no abstained/hallucinated split); the plan's
+judge (M5) replaces it before the M6 benchmark runs. Without ``llm_match`` (the
+pilot) the key-token verdict is the primary one. Key-token matching is never the
+benchmark's final score; from M6 it is only a column that flags judge disagreements.
 
 External dependencies: funasr and transformers Whisper (ASR channel); zhconv.
 """
@@ -125,7 +130,9 @@ def evaluate_run(
             )
     (run_dir / "labels.jsonl").write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in labels))
     (run_dir / "verdicts.jsonl").write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in verdicts))
-    (run_dir / "summary.md").write_text(_summary_markdown(run_id, rows), encoding="utf-8")
+    (run_dir / "summary.md").write_text(
+        _summary_markdown(run_id, rows, llm_primary=llm_match is not None), encoding="utf-8"
+    )
     return rows
 
 
@@ -133,23 +140,53 @@ def _llm(match: object) -> str:
     return "" if match is None else "correct" if match else "incorrect"
 
 
-def _summary_markdown(run_id: str, rows: list[dict[str, object]]) -> str:
+def _disagreements(rows: list[dict[str, object]]) -> list[str]:
+    lines = []
+    for row in rows:
+        for channel in ("transcript", "asr"):
+            llm = row.get(f"llm_{channel}")
+            if llm is not None and (row[channel] == "correct") != llm:
+                lines.append(
+                    f"| {row['plan_id']} | {channel} | {_llm(llm)} | {row[channel]} | "
+                    f"{str(row['reply']).replace('|', '/')} | {row['answer']} |"
+                )
+    return lines
+
+
+def _summary_markdown(run_id: str, rows: list[dict[str, object]], *, llm_primary: bool) -> str:
+    primary = (
+        "Primary verdict: LLM match (uncalibrated). Key-token verdicts are secondary."
+        if llm_primary
+        else "Primary verdict: key-token (no LLM match was run)."
+    )
     lines = [
         f"# {run_id}",
         "",
-        "| plan | kind | item | gap | residency | evicted frac | transcript | asr | llm (transcript / asr) "
+        primary,
+        "",
+        "| plan | kind | item | gap | residency | evicted frac | llm (transcript / asr) | key-token (transcript / asr) "
         "| rehearsed | reply | answer |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for row in rows:
         if "skipped" in row:
-            lines.append(f"| {row['plan_id']} | skipped: {row['skipped']} |||||||||||")
+            lines.append(f"| {row['plan_id']} | skipped: {row['skipped']} ||||||||||")
             continue
         frac = row["evicted_frac"]
         lines.append(
             f"| {row['plan_id']} | {row['kind']} | {row['item_id']} | {row['gap']} | {row['residency']} | "
-            f"{'' if frac is None else f'{frac:.2f}'} | {row['transcript']} | {row['asr']} | "
-            f"{_llm(row['llm_transcript'])} / {_llm(row['llm_asr'])} | {row['rehearsed']} | "
+            f"{'' if frac is None else f'{frac:.2f}'} | {_llm(row['llm_transcript'])} / {_llm(row['llm_asr'])} | "
+            f"{row['transcript']} / {row['asr']} | {row['rehearsed']} | "
             f"{str(row['reply']).replace('|', '/')} | {row['answer']} |"
         )
+    disagreements = _disagreements([row for row in rows if "skipped" not in row])
+    if disagreements:
+        lines += [
+            "",
+            "## Scorer disagreements (listen to these)",
+            "",
+            "| plan | channel | llm | key-token | reply | answer |",
+            "|---|---|---|---|---|---|",
+            *disagreements,
+        ]
     return "\n".join(lines) + "\n"

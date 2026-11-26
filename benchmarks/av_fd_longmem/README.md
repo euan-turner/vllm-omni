@@ -433,8 +433,9 @@ python -m benchmarks.av_fd_longmem run $P/m3-oi-*.json --run-id m3-oi --base-url
 python -m benchmarks.av_fd_longmem score m3-sa m3-oi --asr-device cuda:0 --llm-url http://127.0.0.1:8200
 ```
 
-`--llm-url` adds an LLM answer-match verdict next to the key-token verdict. It
-is **uncalibrated**; the plan's judge is M5. English output audio is
+`--llm-url` adds an LLM answer-match verdict. Since 2026-11-26 it is the
+**primary** verdict and the key-token verdict is secondary; `summary.md` lists
+every disagreement for listening. It is **uncalibrated**; the plan's judge is M5. English output audio is
 transcribed with Whisper.
 
 ### Smoke results (2026-11-25, runs `m3-sa`, `m3-oi`)
@@ -555,7 +556,10 @@ Text counts toward a probe if it starts inside the window that runs from the que
 - A numeric answer matches on its digit groups. `4号车13号门` needs `4` then `13` as whole groups, so `14车13门` and `2.99` are both rejected. Chinese numerals (`一百六十八`, `两`, `点`) are converted first.
 - Any other answer matches on its text after conversion to Simplified Chinese. A parenthetical gives an accepted alternative, so `麗枫酒店（LAVANDE）` accepts either name.
 
-Every verdict carries the reply text so it can be reviewed by hand. The plan's LLM judge replaces this before any bulk runs.
+Every verdict carries the reply text so it can be reviewed by hand. Key-token matching is the primary verdict **only for the pilot**:
+
+- **M4 and experiments:** the LLM match is primary and key-token is secondary.
+- **M6 benchmark runs:** the calibrated M5 judge gives the score. Key-token stays only as an extra column that flags disagreements with the judge; it is too fragile to be the benchmark's score (2026-11-26).
 
 ## Pilot results
 

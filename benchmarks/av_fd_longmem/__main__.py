@@ -328,7 +328,9 @@ def main(argv: list[str] | None = None) -> int:
     score = stages.add_parser("score", help="Label, judge and summarise finished runs.")
     score.add_argument("run_ids", nargs="+")
     score.add_argument("--asr-device", default="cuda:1")
-    score.add_argument("--llm-url", help="LLM server for the uncalibrated answer-match column (omit to skip).")
+    score.add_argument(
+        "--llm-url", help="LLM server for the primary (uncalibrated) answer-match verdict; omit for key-token only."
+    )
     score.set_defaults(handler=_score)
 
     single = stages.add_parser("single-plans", help="Single-probe retention plans for one item at several lags.")
