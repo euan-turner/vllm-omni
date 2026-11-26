@@ -96,6 +96,8 @@ def _redact_images(content: Any) -> Any:
 def _describe(spec: dict[str, Any]) -> str:
     if "enum" in spec:
         return " | ".join(json.dumps(value) for value in spec["enum"])
+    if spec["type"] == "array":
+        return f"list of {_describe(spec['items'])} (at most {spec['maxItems']} items)"
     kind = {"string": "string", "boolean": "true | false", "integer": "integer"}[spec["type"]]
     return f"{kind} (at most {spec['maxLength']} characters)" if "maxLength" in spec else kind
 
@@ -114,7 +116,7 @@ def parse_reply(raw: str, schema: dict[str, Any]) -> dict[str, Any]:
     output, _end = json.JSONDecoder().raw_decode(raw[start:])
     if not isinstance(output, dict):
         raise ValueError(f"reply is not a JSON object: {raw[:200]!r}")
-    types = {"string": str, "boolean": bool, "integer": int}
+    types = {"string": str, "boolean": bool, "integer": int, "array": list}
     for name, spec in schema["properties"].items():
         if name not in output:
             raise ValueError(f"reply lacks {name!r}: {raw[:200]!r}")
@@ -122,6 +124,8 @@ def parse_reply(raw: str, schema: dict[str, Any]) -> dict[str, Any]:
         expected = types[spec["type"]]
         if not isinstance(value, expected) or (expected is int and isinstance(value, bool)):
             raise ValueError(f"reply {name!r} is not {spec['type']}: {raw[:200]!r}")
+        if expected is list and not all(isinstance(entry, types[spec["items"]["type"]]) for entry in value):
+            raise ValueError(f"reply {name!r} has an entry that is not {spec['items']['type']}: {raw[:200]!r}")
         if "enum" in spec and value not in spec["enum"]:
             raise ValueError(f"reply {name!r}={value!r} not in {spec['enum']}")
     return {name: output[name] for name in schema["properties"]}

@@ -39,6 +39,10 @@ def _text(max_chars: int) -> dict[str, Any]:
     return {"type": "string", "maxLength": max_chars}
 
 
+def _list(item: dict[str, Any], max_items: int) -> dict[str, Any]:
+    return {"type": "array", "items": item, "maxItems": max_items}
+
+
 _MODALITY = {"type": "string", "enum": MODALITIES}
 _VERDICT = {"type": "string", "enum": ["yes", "no", "unclear"]}
 
@@ -59,6 +63,26 @@ REWRITE_OMNIINTERACT = Prompt(
         "standalone：改写后的问题是否能在不看原上下文时明确指代对象。"
     ),
     schema=_object({"query": _text(200), "answer": _text(120), "modality": _MODALITY, "standalone": _BOOL}),
+)
+
+#: The reference answer is set by its own prompt, not by the rewrite, so changing it leaves the queries untouched.
+SHORT_ANSWER = Prompt(
+    prompt_id="short_answer",
+    version=3,
+    system=(
+        "你在为一个视频记忆基准整理参考答案。给你一个问题和它的原答案。\n"
+        "answer：能回答问题的最短说法。\n"
+        "- 去掉寒暄、对问题的复述（如“好的”“我看到”“这上面写的是”“主色调是”）。\n"
+        "- 只保留问题问的那一项；原答案在主答案之外补充的次要细节要去掉"
+        "（“主色调是粉色，部分偏浅粉色”→“粉色”）。问题本身要求列出多项时才保留多项，用“，”分隔。\n"
+        "- 是非题只答“是”或“不是”。\n"
+        "- 保留数字和单位；不要加入原答案没有的内容。\n"
+        "aliases：同一个答案的其他写法，只限繁简体、中英文、大小写、全称与简称"
+        "（“UGG”→“ugg”，“粉色”→“pink”，“上海三菱电梯”→“三菱电梯”），最多4个。"
+        "不要给同义词或近似的说法（“酒红色”不能写成“深红色”，“浅粉色”不能写成“粉色”）。没有就给空列表。"
+    ),
+    schema=_object({"answer": _text(40), "aliases": _list(_text(40), 4)}),
+    max_tokens=128,
 )
 
 ANNOTATE_STREAMARENA = Prompt(
@@ -165,6 +189,19 @@ def _annotation(chat: CachedChat, prompt: Prompt, content: str | Sequence[dict[s
 
 def rewrite_omniinteract(llm: CachedChat, question: str, answer: str) -> Annotation:
     return _annotation(llm, REWRITE_OMNIINTERACT, f"原问题：{question}\n原答案：{answer}")
+
+
+def short_answer(llm: CachedChat, question: str, answer: str) -> Annotation:
+    return _annotation(llm, SHORT_ANSWER, f"问题：{question}\n原答案：{answer}")
+
+
+def reference_answer(answer: str, aliases: Sequence[str]) -> str:
+    """The answer with each distinct alias as a parenthetical, the alias form ``score.answer_keys`` reads.
+
+    Aliases that contain brackets themselves are dropped, since they would split into wrong keys.
+    """
+    extra = [a.strip() for a in aliases if a.strip() and a.strip() != answer.strip() and not set(a) & set("（）()")]
+    return answer.strip() + "".join(f"（{alias}）" for alias in dict.fromkeys(extra))
 
 
 def annotate_streamarena(llm: CachedChat, question: str, answer: str, hints: Sequence[str]) -> Annotation:

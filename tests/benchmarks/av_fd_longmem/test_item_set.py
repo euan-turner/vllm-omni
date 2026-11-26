@@ -13,10 +13,12 @@ from pathlib import Path
 import pytest
 
 from benchmarks.av_fd_longmem import llm
+from benchmarks.av_fd_longmem.annotate import reference_answer
 from benchmarks.av_fd_longmem.build import RETENTION_LAGS, SetPaths, item_plans, item_pool, pick
 from benchmarks.av_fd_longmem.evaluate import _items
 from benchmarks.av_fd_longmem.planner import PlannedProbe, ablation_variant, blind_variant, plan_chained
 from benchmarks.av_fd_longmem.schema import ClipRef, FillerClip, Item, ItemClips, QueryClip, write_jsonl
+from benchmarks.av_fd_longmem.score import answer_keys, carries_key
 from benchmarks.av_fd_longmem.sources.streamarena import lag_neutral
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
@@ -148,6 +150,30 @@ def test_parse_reply_takes_the_first_object_and_drops_extra_keys() -> None:
 def test_parse_reply_rejects_a_reply_that_breaks_the_schema(raw: str) -> None:
     with pytest.raises(ValueError):
         llm.parse_reply(raw, SCHEMA)
+
+
+LIST_SCHEMA = {
+    "type": "object",
+    "properties": {"aliases": {"type": "array", "items": {"type": "string", "maxLength": 10}, "maxItems": 4}},
+}
+
+
+def test_a_list_of_strings_is_described_and_checked() -> None:
+    assert "list of string (at most 10 characters) (at most 4 items)" in llm.reply_format(LIST_SCHEMA)
+    assert llm.parse_reply('{"aliases": ["a", "b"]}', LIST_SCHEMA) == {"aliases": ["a", "b"]}
+    with pytest.raises(ValueError):
+        llm.parse_reply('{"aliases": "a"}', LIST_SCHEMA)
+    with pytest.raises(ValueError):
+        llm.parse_reply('{"aliases": ["a", 1]}', LIST_SCHEMA)
+
+
+def test_reference_answer_writes_aliases_as_parentheticals_the_scorer_accepts() -> None:
+    answer = reference_answer("粉色", ["粉红色", "pink", "粉色", " ", "红(深)"])
+
+    assert answer == "粉色（粉红色）（pink）"
+    assert answer_keys(answer) == ["粉色", "粉红色", "pink"]
+    assert carries_key("那些花是粉红色的", answer_keys(answer))
+    assert reference_answer("ugg", []) == "ugg"
 
 
 class _FakeServer:

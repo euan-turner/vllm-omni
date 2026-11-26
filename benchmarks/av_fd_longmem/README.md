@@ -364,11 +364,27 @@ CUDA_VISIBLE_DEVICES=1 vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
    VLM output.
    - **Query rewrite.**
      - OmniInteract: the LLM rewrites the present-tense question to a
-       lag-neutral past (之前看到的…) and strips the answer down.
+       lag-neutral past (之前看到的…).
      - StreamArena: a fixed rule replaces 刚才/刚刚/方才 with 之前, and "just
        now" with "earlier" (`sources.streamarena.lag_neutral`). LLM rewrites
        switched the language and pasted timestamps from the evidence hint
        into the question.
+   - **OmniInteract reference answer** (LLM, `short_answer` prompt v3, since
+     2026-11-26): the shortest answer to what the question asks, with secondary
+     detail dropped and yes/no answers reduced to 是/不是. Aliases (up to 4)
+     are only other spellings of the same name (script, language, case, full
+     or short form: `ugg（Ugg）`), in the parenthetical form the key-token
+     scorer reads. Synonyms are left to the LLM verdict, because the 4-bit LLM
+     offered near-misses as synonyms (酒红色 → 深红色) even when told not to.
+     Its own prompt keeps the rewritten queries unchanged; the rewrite's answer
+     is kept as `answer_rewrite`.
+     - On the 20 M3 candidates: 0038 `主色调是粉色，部分盛开的偏浅粉色。` → `粉色`,
+       0094 `是的这是一扇门` → `是`; the rest are unchanged or trivially
+       shorter. With `粉色`, key-token agrees with the LLM on 8 of 0038's 10
+       M3 channels; the blind reply 粉红色 still fails key-token.
+     - Key-token is weak on two answer shapes: yes/no (`是` occurs in `不是`)
+       and multi-part answers, whose parts must be adjacent in the reply
+       (0061 `绿色，黄色`). The LLM verdict is primary for both.
    - **StreamArena tags** (LLM): `relative_time`, `non_standalone` and
      `present_referent` each exclude an item. Items with several evidence
      windows are excluded too, because the planner takes one evidence clip.

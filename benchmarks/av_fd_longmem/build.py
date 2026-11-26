@@ -5,7 +5,8 @@
 Stages, each resumable (LLM/VLM calls are cached, clips are cut deterministically):
 
 1. ``*_candidates``: query rewrite (OmniInteract: LLM; StreamArena: recency words
-   replaced by ``sources.streamarena.lag_neutral``), LLM tags, evidence clip, ASR of the
+   replaced by ``sources.streamarena.lag_neutral``), the OmniInteract reference answer
+   (``annotate.SHORT_ANSWER``: shortest answer plus aliases), LLM tags, evidence clip, ASR of the
    evidence audio and grounding, one record per candidate in
    ``<source>/sets/<set>/candidates.jsonl`` (excluded candidates keep their reason).
    *Grounded* = the VLM answers the question correctly from the evidence frames
@@ -177,6 +178,7 @@ def omniinteract_candidates(
         item_id = f"oi-1q1a-{row.clip}-{row.qa_index}"
         question = oi.annotated_question(data_root, "1q1a", row.clip, row.qa_index)
         rewrite = an.rewrite_omniinteract(models.llm, question.question_text, question.answer_text)
+        short = an.short_answer(models.llm, question.question_text, question.answer_text)
         assert row.onset_s is not None
         span = oi.evidence_window(row.onset_s, lookback_s=oi.EVIDENCE_LOOKBACK_S)
         assert span is not None
@@ -196,7 +198,8 @@ def omniinteract_candidates(
             "question_original": question.question_text,
             "answer_original": question.answer_text,
             "query": rewrite.output["query"],
-            "answer": rewrite.output["answer"],
+            "answer": an.reference_answer(short.output["answer"], short.output["aliases"]),
+            "answer_rewrite": rewrite.output["answer"],
             "modality_declared": rewrite.output["modality"],
             "flags": {"standalone": rewrite.output["standalone"]},
             "evidence": {"path": paths.rel(clip), "chunks": chunks, "source_s": [start_s, start_s + chunks]},
@@ -206,7 +209,7 @@ def omniinteract_candidates(
             "status": "candidate" if rewrite.output["standalone"] else "excluded",
             "reason": None if rewrite.output["standalone"] else "non_standalone",
         }
-        records.append(_finish(record, models, clip, chunks, [rewrite.provenance]))
+        records.append(_finish(record, models, clip, chunks, [rewrite.provenance, short.provenance]))
     _write_rows(paths.set_root / "candidates.jsonl", records)
     return records
 
