@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Iterator
-from dataclasses import asdict, dataclass, fields, is_dataclass
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Literal, TypeVar, get_args, get_origin, get_type_hints
 
@@ -69,6 +69,8 @@ class Item:
     provenance: dict[str, Any]
     status: str = "candidate"
     task: str = "reactive"
+    domain: str | None = None
+    filler_exclude: list[str] = field(default_factory=list)  # filler_ids that show or say this item's answer
     schema_version: int = SCHEMA_VERSION
 
 

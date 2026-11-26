@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """Session planner: lay out (evidence, query) probes and tile the rest with filler.
 
-A chained plan holds several probes in one stream. Probes are placed longest
+A chained plan holds several probes in one stream. Controls are derived from
+a built plan without moving any chunk: the blind control replaces each
+evidence segment with unused filler of the same length, and the modality
+ablations mute or freeze the evidence segments. Probes are placed longest
 lag first, each at the earliest stream chunk where neither its evidence nor its
 query clip (query plus silent answer tail) comes within ``margin`` chunks of
 anything already placed. Every remaining span is filler: whole filler clips,
@@ -15,7 +18,7 @@ External dependencies: none.
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from benchmarks.av_fd_longmem.schema import FillerClip, Item, Probe, Segment, SessionPlan
 
@@ -121,3 +124,34 @@ def plan_chained(
         probes=plan_probes,
         total_chunks=total,
     )
+
+
+def blind_variant(plan: SessionPlan, filler: Sequence[FillerClip], *, plan_id: str) -> SessionPlan:
+    """``plan`` with every evidence segment replaced by filler the plan does not already play.
+
+    Probe coordinates are unchanged, so the blind control has the same gap and
+    stream length as the plan it is derived from.
+    """
+    used = {segment.clip for segment in plan.segments}
+    pool = iter([clip for clip in filler if clip.path not in used])
+    segments: list[Segment] = []
+    for segment in plan.segments:
+        if segment.role == "evidence":
+            span = (segment.stream_chunk0, segment.stream_chunk0 + segment.play_chunks)
+            segments += _filler_segments(span, pool)
+        else:
+            segments.append(segment)
+    return replace(plan, plan_id=plan_id, kind="control_blind", segments=segments)
+
+
+def ablation_variant(plan: SessionPlan, *, mode: str, plan_id: str) -> SessionPlan:
+    """``plan`` with its evidence segments muted (``mode="audio"``) or frozen on their first frame (``"video"``)."""
+    if mode not in {"audio", "video"}:
+        raise ValueError(f"ablation mode must be audio or video, got {mode!r}")
+    segments = [
+        replace(segment, audio="mute") if segment.role == "evidence" and mode == "audio"
+        else replace(segment, video="freeze") if segment.role == "evidence"
+        else segment
+        for segment in plan.segments
+    ]  # fmt: skip
+    return replace(plan, plan_id=plan_id, kind=f"ablate_{mode}", segments=segments)

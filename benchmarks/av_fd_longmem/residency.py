@@ -50,7 +50,7 @@ class UnitSpan:
 @dataclass(frozen=True)
 class ProbeResidency:
     item_id: str
-    label: str  # in | out | partial
+    label: str  # in | out | partial (evaluate sets n/a for blind controls)
     evidence_units: list[int]
     units_out: int
     units_partial: int

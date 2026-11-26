@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
-"""Speech segmentation for amended query onsets: fsmn-vad segments, each transcribed by Paraformer-zh.
+"""Speech segmentation for amended query onsets (fsmn-vad + Paraformer-zh), and zh/en transcription.
 
 Models load from the Hugging Face hub (``funasr/fsmn-vad``, ``funasr/paraformer-zh``)
 on first use; ModelScope is not used.
 
-External dependencies: funasr (pinned dev dependency), numpy, ffmpeg on PATH.
+External dependencies: funasr (pinned dev dependency), numpy, ffmpeg on PATH; for English,
+Whisper-large-v3 through ``vllm_omni.benchmarks.data_modules.seed_tts_eval`` (transformers).
 """
 
 from __future__ import annotations
@@ -73,3 +74,31 @@ class FunasrSpeechSegmenter:
             return ""
         _, asr = self._models()
         return asr.generate(input=wav, fs=SAMPLE_RATE)[0]["text"].replace(" ", "")
+
+
+class BilingualTranscriber:
+    """``(lang, 16 kHz mono samples) -> transcript``: Paraformer-zh (Simplified) for zh, Whisper-large-v3 for en.
+
+    The same pair as ``vllm_omni.benchmarks.data_modules.seed_tts_eval``; Whisper
+    runs on ``SEED_TTS_EVAL_DEVICE`` (set it before the first English call).
+    """
+
+    def __init__(self, paraformer: FunasrSpeechSegmenter) -> None:
+        self._paraformer = paraformer
+
+    def __call__(self, lang: str, samples: Sequence[float]) -> str:
+        wav = np.asarray(samples, dtype=np.float32)
+        if not wav.size or float(np.abs(wav).max()) < 1e-4:
+            return ""
+        if lang == "zh":
+            import zhconv
+
+            return zhconv.convert(self._paraformer.transcribe_samples(wav), "zh-cn")
+        if lang == "en":
+            from vllm_omni.benchmarks.data_modules.seed_tts_eval import _transcribe_en_f32_16k
+
+            return _transcribe_en_f32_16k(wav)
+        raise ValueError(f"no transcriber for language {lang!r}")
+
+    def transcribe_file(self, lang: str, path: Path) -> str:
+        return self(lang, read_audio_f32(path))

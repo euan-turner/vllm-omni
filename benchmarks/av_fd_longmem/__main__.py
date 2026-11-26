@@ -13,6 +13,10 @@ Stages:
 - ``audit-handcheck``: M0 evidence hand-check sample (contact sheets + evidence ASR) for both sources.
 - ``window-plans``: M1 filler-only window plans, one per window mode.
 - ``window-report``: M1 window measurements (tokens per unit, eviction lag, resident span) for a run.
+- ``set-annotate``: LLM/VLM annotation of a source's candidates into an item set (needs LLM and VLM servers).
+- ``set-items``: pick an item set's items, speak their queries, cut query clips (needs TTS and VLM servers).
+- ``set-plans``: leakage-checked control, ablation and retention plans for an item set (needs a VLM server).
+- ``render-preview``: one plan rendered to an mp4, exactly as streamed, for checking by eye and ear.
 
 External dependencies: see each stage's module.
 """
@@ -76,12 +80,31 @@ def _run(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+def _transcriber(device: str):  # -> asr.BilingualTranscriber
+    import os
+
+    from benchmarks.av_fd_longmem.asr import BilingualTranscriber, FunasrSpeechSegmenter
+
+    os.environ.setdefault("SEED_TTS_EVAL_DEVICE", device)
+    return BilingualTranscriber(FunasrSpeechSegmenter(device=device))
+
+
 def _score(args: argparse.Namespace) -> int:
-    from benchmarks.av_fd_longmem.asr import FunasrSpeechSegmenter
     from benchmarks.av_fd_longmem.evaluate import evaluate_run
 
+    asr = _transcriber(args.asr_device)
+    llm_match = None
+    if args.llm_url:
+        from benchmarks.av_fd_longmem.annotate import answers_match
+        from benchmarks.av_fd_longmem.llm import LLM_MODEL, LLM_REVISION, CachedChat, ChatModel
+
+        chat = CachedChat(ChatModel(args.llm_url, LLM_MODEL, LLM_REVISION), args.dataset_root / "cache" / "llm")
+
+        def llm_match(item, reply: str) -> bool:
+            return bool(answers_match(chat, item.query_text, item.answer, reply).output["match"])
+
     for run_id in args.run_ids:
-        evaluate_run(args.dataset_root, run_id, asr=FunasrSpeechSegmenter(device=args.asr_device))
+        evaluate_run(args.dataset_root, run_id, asr=asr, llm_match=llm_match)
         print((args.dataset_root / "runs" / run_id / "summary.md").read_text(encoding="utf-8"))
     return 0
 
@@ -205,6 +228,79 @@ def _window_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _set_models(args: argparse.Namespace):  # -> (build.SetPaths, build.Models)
+    from benchmarks.av_fd_longmem.build import Models, SetPaths
+    from benchmarks.av_fd_longmem.llm import LLM_MODEL, LLM_REVISION, VLM_MODEL, VLM_REVISION, CachedChat, ChatModel
+
+    paths = SetPaths(out_root=args.dataset_root, source=args.source, set_name=args.set)
+    models = Models(
+        llm=CachedChat(ChatModel(args.llm_url, LLM_MODEL, LLM_REVISION), paths.cache("llm")),
+        vlm=CachedChat(ChatModel(args.vlm_url, VLM_MODEL, VLM_REVISION), paths.cache("vlm")),
+        transcribe=_transcriber(args.asr_device),
+    )
+    return paths, models
+
+
+def _set_annotate(args: argparse.Namespace) -> int:
+    from collections import Counter
+
+    from benchmarks.av_fd_longmem.build import omniinteract_candidates, streamarena_candidates
+
+    paths, models = _set_models(args)
+    if args.source == "omniinteract":
+        records = omniinteract_candidates(paths, args.omniinteract_root, models, n=args.n)
+    else:
+        records = streamarena_candidates(paths, models)
+    print(json.dumps(Counter(r["reason"] or "candidate" for r in records), ensure_ascii=False))
+    for r in records:
+        g = r.get("grounding", {})
+        print(
+            f"{r['item_id']}: {r['status']} {r['reason'] or ''} | {r['query']} -> {r['answer']} | "
+            f"vlm={g.get('visual_read', {}).get('answer')!r} visual={g.get('visual')} audio={g.get('audio_stated')}"
+        )
+    return 0
+
+
+def _set_items(args: argparse.Namespace) -> int:
+    from benchmarks.av_fd_longmem.build import build_items, pick
+
+    paths, models = _set_models(args)
+    candidates = [json.loads(line) for line in (paths.set_root / "candidates.jsonl").read_text().splitlines()]
+    per_lang = {lang: int(count) for lang, count in (pair.split("=") for pair in args.per_lang)} or None
+    chosen = pick(candidates, n=args.n, per_lang=per_lang)
+    items, filler = build_items(
+        paths, chosen, models, data_root=args.omniinteract_root, tts_url=args.tts_url,
+        transcribe_file=models.transcribe.transcribe_file,
+    )  # fmt: skip
+    for item in items:
+        print(f"{item.item_id}: {item.query_text} -> {item.answer} ({item.modality_declared}, {item.lang})")
+    print(f"filler pool: {len(filler)} clips, {sum(f.chunks for f in filler)} chunks")
+    return 0
+
+
+def _set_plans(args: argparse.Namespace) -> int:
+    from benchmarks.av_fd_longmem.build import build_plans, load_set
+
+    paths, models = _set_models(args)
+    items, filler = load_set(paths)
+    items, plans = build_plans(paths, items, filler, models)
+    for item in items:
+        print(f"{item.item_id}: filler_exclude={item.filler_exclude}")
+    for plan in plans:
+        print(f"{plan.plan_id}: {plan.kind} {plan.total_chunks} chunks, gaps {[p.gap_chunks for p in plan.probes]}")
+    return 0
+
+
+def _render_preview(args: argparse.Namespace) -> int:
+    from benchmarks.av_fd_longmem.render import render_preview
+    from benchmarks.av_fd_longmem.schema import SessionPlan, read_json
+
+    plan = read_json(args.plan, SessionPlan)
+    out = render_preview(plan, args.dataset_root, args.out)
+    print(out)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m benchmarks.av_fd_longmem", description=__doc__.split("\n\n")[0])
     parser.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT)
@@ -232,6 +328,7 @@ def main(argv: list[str] | None = None) -> int:
     score = stages.add_parser("score", help="Label, judge and summarise finished runs.")
     score.add_argument("run_ids", nargs="+")
     score.add_argument("--asr-device", default="cuda:1")
+    score.add_argument("--llm-url", help="LLM server for the uncalibrated answer-match column (omit to skip).")
     score.set_defaults(handler=_score)
 
     single = stages.add_parser("single-plans", help="Single-probe retention plans for one item at several lags.")
@@ -269,6 +366,30 @@ def main(argv: list[str] | None = None) -> int:
     report = stages.add_parser("window-report", help="M1 window measurements for a finished run.")
     report.add_argument("run_id")
     report.set_defaults(handler=_window_report)
+
+    def set_stage(name: str, help_text: str, handler) -> argparse.ArgumentParser:
+        stage = stages.add_parser(name, help=help_text)
+        stage.add_argument("--set", default="m3", help="Item set name (<source>/sets/<set>, plans/<set>).")
+        stage.add_argument("--source", choices=["omniinteract", "streamarena"], required=True)
+        stage.add_argument("--omniinteract-root", type=Path, help="OmniInteract `data` directory.")
+        stage.add_argument("--llm-url", default="http://127.0.0.1:8200")
+        stage.add_argument("--vlm-url", default="http://127.0.0.1:8201")
+        stage.add_argument("--asr-device", default="cpu")
+        stage.set_defaults(handler=handler)
+        return stage
+
+    annotate = set_stage("set-annotate", "Annotate a source's candidates into an item set.", _set_annotate)
+    annotate.add_argument("--n", type=int, default=20, help="OmniInteract candidates to sample.")
+    items = set_stage("set-items", "Pick items, speak queries, cut query clips.", _set_items)
+    items.add_argument("--n", type=int, default=5)
+    items.add_argument("--per-lang", nargs="*", default=[], help="lang=count, e.g. en=2 zh=3 (StreamArena).")
+    items.add_argument("--tts-url", default="http://127.0.0.1:8091")
+    set_stage("set-plans", "Write leakage-checked plans for an item set.", _set_plans)
+
+    preview = stages.add_parser("render-preview", help="Render one plan to an mp4, exactly as streamed.")
+    preview.add_argument("plan", type=Path)
+    preview.add_argument("--out", type=Path, required=True)
+    preview.set_defaults(handler=_render_preview)
 
     args = parser.parse_args(argv)
     return args.handler(args)

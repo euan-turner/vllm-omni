@@ -181,6 +181,21 @@ def needs_lag_neutral_rewrite(row: RecallRow) -> bool:
     return bool(_RECENCY.search(row.question))
 
 
+_ZH_RECENCY = re.compile(r"刚才|刚刚|方才")
+_EN_JUST_VERB = re.compile(r"\bjust (saw|seen|showed|shown|mentioned)\b", re.IGNORECASE)
+_EN_JUST_NOW = re.compile(r"\b(just now|a moment ago)\b", re.IGNORECASE)
+
+
+def lag_neutral(question: str) -> str:
+    """The question with its recency words made true at any lag: 刚才/刚刚/方才 -> 之前, "just now" -> "earlier".
+
+    "just <verb>" becomes "<verb> earlier". Everything else is kept verbatim.
+    """
+    text = _ZH_RECENCY.sub("之前", question)
+    text = _EN_JUST_VERB.sub(lambda m: f"{m.group(1)} earlier", text)
+    return _EN_JUST_NOW.sub("earlier", text)
+
+
 def evidence_windows(
     points: Sequence[int], ask_sec: int, cues: Sequence[tuple[float, float]] = ()
 ) -> list[tuple[int, int]]:

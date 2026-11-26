@@ -9,12 +9,17 @@ repeats the segment's first frame. Frames are re-encoded with the PIL JPEG
 quality that ``vllm_omni.benchmarks.duplex.omni_duplex_eval_media.extract_jpeg``
 maps ffmpeg ``-q:v 5`` to.
 
-External dependencies: PyAV, Pillow, numpy.
+``render_preview`` writes the same units to an mp4 (1 fps, 16 kHz mono) for
+checking a plan by eye and ear.
+
+External dependencies: PyAV, Pillow, numpy; ffmpeg on PATH for ``render_preview``.
 """
 
 from __future__ import annotations
 
 import io
+import subprocess
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -90,3 +95,29 @@ def render_units(plan: SessionPlan, root: Path) -> Iterator[Unit]:
         expected += segment.play_chunks
     if expected != plan.total_chunks:
         raise ValueError(f"segments cover {expected} chunks, plan has {plan.total_chunks}")
+
+
+_PREVIEW_FIT = "scale=640:640:force_original_aspect_ratio=decrease,pad=640:640:(ow-iw)/2:(oh-ih)/2"
+
+
+def render_preview(plan: SessionPlan, root: Path, out: Path) -> Path:
+    """``plan``'s stream units as an mp4: frame k shown for second k, the PCM exactly as sent.
+
+    Frames are letterboxed to 640x640, so segments of different shapes share one video stream.
+    """
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(suffix=".pcm") as pcm:
+        frames = []
+        for chunk_pcm, jpeg in render_units(plan, root):
+            pcm.write(chunk_pcm)
+            frames.append(jpeg)
+        pcm.flush()
+        subprocess.run(
+            ["ffmpeg", "-loglevel", "error", "-y",
+             "-f", "image2pipe", "-framerate", "1", "-c:v", "mjpeg", "-i", "-",
+             "-f", "s16le", "-ar", str(SAMPLE_RATE), "-ac", "1", "-i", pcm.name,
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-vf", _PREVIEW_FIT, "-r", "1",
+             "-c:a", "aac", "-b:a", "96k", "-shortest", str(out)],
+            input=b"".join(frames), check=True,
+        )  # fmt: skip
+    return out
