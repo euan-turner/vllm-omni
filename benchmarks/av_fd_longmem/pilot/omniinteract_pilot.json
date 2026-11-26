@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "source": "omniinteract",
+  "subset": "1q1a",
+  "lang": "zh",
+  "note": "Hand-picked pilot pairs. Answers come from the annotations unless answer_override is set; query_text is our lag-neutral past-tense rewrite (之前…, not 刚才…, so it stays true at any lag).",
+  "items": [
+    {"clip": "0124", "qa_index": 4, "query_text": "之前看到的驯龙高手没牙仔，零售价是多少钱一件？", "lag_chunks": 600, "modality": "visual"},
+    {"clip": "0130", "qa_index": 4, "query_text": "之前看到的那台设备上，客户服务热线电话是多少？", "lag_chunks": 300, "modality": "visual"},
+    {"clip": "0115", "qa_index": 6, "query_text": "之前看到的那个咸蛋，标价是多少钱一颗？", "answer_override": "2元一颗", "lag_chunks": 180, "modality": "visual"},
+    {"clip": "0108", "qa_index": 0, "query_text": "之前看到的那副墨镜标价多少钱？", "lag_chunks": 60, "modality": "visual"},
+    {"clip": "0102", "qa_index": 4, "query_text": "之前在地铁上看到的那个位置是几号车几号门？", "lag_chunks": 30, "modality": "visual"},
+    {"clip": "0127", "qa_index": 0, "query_text": "之前看到的那家酒店叫什么名字？", "answer_override": "麗枫酒店（LAVANDE）", "lag_chunks": 10, "modality": "visual"}
+  ]
+}

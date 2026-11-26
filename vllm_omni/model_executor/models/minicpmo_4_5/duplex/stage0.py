@@ -59,6 +59,8 @@ def _frame_preprocess_pool() -> ThreadPoolExecutor | None:
 class _MiniCPMO45WindowUnit:
     embeds: list[Any] = field(default_factory=list)
     token_ids: list[int] = field(default_factory=list)
+    #: ``seq`` of the append whose input opened this unit (``None`` when unknown).
+    seq: int | None = None
 
 
 @dataclass
@@ -183,6 +185,32 @@ class MiniCPMO45Stage0DuplexRuntime:
                 result.get("stage0_window_replaced") is True,
             )
         )
+
+    def _trace_window_drop(
+        self,
+        state: _MiniCPMO45Stage0SessionState,
+        *,
+        epoch: int | None,
+        seq: int | None,
+        path: str,
+        kv: dict[str, int] | None,
+        drops: list[tuple[int | None, list[int], int, int]],
+    ) -> None:
+        """Record window units dropped while handling append ``(epoch, seq)`` (``tick_trace`` ``ev`` record).
+
+        ``drops`` holds ``(unit_seq, unit_token_ids, drop_start, drop_end)``: each
+        affected unit's tokens before the drop and the dropped range within them.
+        """
+        tracer = getattr(self, "_tick_trace", None)
+        if tracer is None or not drops:
+            return
+        audio_id = self._audio_embedding_placeholder_token_id()
+        image_id = self._vision_embedding_placeholder_token_id()
+        rows = []
+        for unit_seq, unit_token_ids, drop_start, drop_end in drops:
+            dropped = unit_token_ids[drop_start:drop_end]
+            rows.append([unit_seq, len(unit_token_ids), len(dropped), dropped.count(audio_id), dropped.count(image_id)])
+        tracer.emit(("ev", time.monotonic_ns(), state.session_id, epoch, seq, path, kv, rows))
 
     def build_audio_cuda_graph(self) -> bool:
         """Capture the streaming-encoder CUDA graphs once weights are loaded (idempotent; failures stay eager).
@@ -587,7 +615,7 @@ class MiniCPMO45Stage0DuplexRuntime:
             units_built += 1
             if state.window_enabled:
                 if state.pending_window_unit is None:
-                    state.pending_window_unit = _MiniCPMO45WindowUnit()
+                    state.pending_window_unit = _MiniCPMO45WindowUnit(seq=seq)
                 state.pending_window_unit.embeds.extend(embed_parts[unit_embed_start:])
                 state.pending_window_unit.token_ids.extend(token_ids[unit_token_start:])
             chunk_size = self._streaming_chunk_size(processor)
@@ -599,7 +627,7 @@ class MiniCPMO45Stage0DuplexRuntime:
 
         import torch
 
-        window_result = self._window_replacement_parts(state, stage0_window)
+        window_result = self._window_replacement_parts(state, stage0_window, epoch=epoch, seq=seq)
         if window_result is not None:
             embed_parts, token_ids = window_result
         inputs_embeds = torch.cat([self._as_2d_tensor(embed) for embed in embed_parts], dim=0)
@@ -642,7 +670,7 @@ class MiniCPMO45Stage0DuplexRuntime:
         embeds = list(pending.embeds)
         embeds.extend(self._embed_token(token_id) for token_id in generated)
         embeds.extend(self._embed_token(token_id) for token_id in closure_token_ids)
-        state.window_units.append(_MiniCPMO45WindowUnit(embeds=embeds, token_ids=token_ids))
+        state.window_units.append(_MiniCPMO45WindowUnit(embeds=embeds, token_ids=token_ids, seq=pending.seq))
         state.pending_window_unit = None
         state.pending_window_generated_tokens.clear()
 
@@ -693,6 +721,9 @@ class MiniCPMO45Stage0DuplexRuntime:
         self,
         state: _MiniCPMO45Stage0SessionState,
         stage0_reanchor: dict[str, Any],
+        *,
+        epoch: object = None,
+        seq: object = None,
     ) -> None:
         """Evict completed window units that were dropped by zero-copy KV re-anchor.
 
@@ -726,6 +757,7 @@ class MiniCPMO45Stage0DuplexRuntime:
         drop_end = drop_start + delta
 
         new_units: list[_MiniCPMO45WindowUnit] = []
+        drops: list[tuple[int | None, list[int], int, int]] = []
         curr_offset = 0
         for unit in state.window_units:
             u_len = len(unit.token_ids)
@@ -736,6 +768,8 @@ class MiniCPMO45Stage0DuplexRuntime:
             local_drop_start = max(0, drop_start - u_start)
             local_drop_end = min(u_len, drop_end - u_start)
 
+            if local_drop_start < local_drop_end:
+                drops.append((unit.seq, unit.token_ids, local_drop_start, local_drop_end))
             if local_drop_start >= local_drop_end:
                 new_units.append(unit)
             elif local_drop_start == 0 and local_drop_end == u_len:
@@ -750,11 +784,27 @@ class MiniCPMO45Stage0DuplexRuntime:
                 new_units.append(unit)
 
         state.window_units = new_units
+        self._trace_window_drop(
+            state,
+            epoch=_optional_int(epoch),
+            seq=_optional_int(seq),
+            path="compact",
+            kv={
+                "delta": delta,
+                "sink_end": int(sink_end),
+                "moved_from": _optional_int(moved_from),
+                "prefix_tokens": prefix_tokens,
+            },
+            drops=drops,
+        )
 
     def _window_replacement_parts(
         self,
         state: _MiniCPMO45Stage0SessionState,
         stage0_window: dict[str, Any] | None,
+        *,
+        epoch: int | None = None,
+        seq: int | None = None,
     ) -> tuple[list[Any], list[int]] | None:
         if not isinstance(stage0_window, dict) or stage0_window.get("replace") is not True:
             return None
@@ -767,6 +817,7 @@ class MiniCPMO45Stage0DuplexRuntime:
                 "MiniCPM-o Stage-0 window history is shorter than the scheduler drop plan: "
                 f"drop={drop_units}, completed={len(state.window_units)}"
             )
+        dropped_units = state.window_units[:drop_units]
         del state.window_units[:drop_units]
 
         mode = stage0_window.get("mode")
@@ -809,6 +860,14 @@ class MiniCPMO45Stage0DuplexRuntime:
                 f"suffix={len(state.context_suffix_token_ids)}, previous={len(previous_ids)}, "
                 f"units={unit_lengths}, pending={pending_len}, drop={drop_units}"
             )
+        self._trace_window_drop(
+            state,
+            epoch=epoch,
+            seq=seq,
+            path="replace",
+            kv=None,
+            drops=[(unit.seq, unit.token_ids, 0, len(unit.token_ids)) for unit in dropped_units],
+        )
         return embeds, token_ids
 
     @staticmethod

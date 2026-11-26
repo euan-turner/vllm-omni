@@ -29,8 +29,8 @@ repos:
     rev: v1.49.0
     hooks:
       - id: typos
-        # only for staged files
-        exclude: ^apps/ComfyUI-ABC-Preview/web/vendor/abcjs-basic-min\.cjs$
+        # only for staged files; dataset video-id lists are excluded because typos "corrects" ids
+        exclude: ^(apps/ComfyUI-ABC-Preview/web/vendor/abcjs-basic-min\.cjs|benchmarks/av_fd_longmem/sets/.*\.json)$
 
   - repo: https://github.com/rhysd/actionlint
     # v1.7.8+ sets `go 1.24.0` in go.mod, which older Go toolchains (and most

@@ -536,7 +536,15 @@ class MiniCPMO45DuplexWindowPolicy:
             return None
 
         base_len = int(getattr(session, "num_computed_tokens", 0) or 0)
-        prefix_tokens = int(runtime_config.get("duplex_window_prefix_tokens", 96) or 96)
+        # Basic mode keeps the whole first-append context (system prefix, ref
+        # audio and suffix) ahead of the first unit, so the sink and the unit
+        # boundaries start after the suffix. The prefix-only count belongs to
+        # context mode, where previous text is spliced in before the suffix.
+        prefix_tokens = int(
+            runtime_config.get("duplex_first_append_context_tokens")
+            or runtime_config.get("duplex_window_prefix_tokens", 96)
+            or 96
+        )
         high_watermark = int(window.get("basic_window_high_tokens", 8000) or 8000)
         low_watermark = int(window.get("basic_window_low_tokens", 6000) or 6000)
 
@@ -935,6 +943,11 @@ class MiniCPMO45DuplexWorkerHelper:
                 session_state = helper.sessions.get(session_key) if session_key else None
                 if session_state is not None and hasattr(session_state, "window_units"):
                     if hasattr(helper, "_evict_window_units_for_reanchor"):
-                        helper._evict_window_units_for_reanchor(session_state, reanchor)
+                        helper._evict_window_units_for_reanchor(
+                            session_state,
+                            reanchor,
+                            epoch=duplex.get("epoch"),
+                            seq=duplex.get("seq"),
+                        )
                     else:
                         session_state.window_units.clear()

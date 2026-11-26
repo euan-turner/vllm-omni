@@ -24,6 +24,19 @@ Records (JSON arrays, first element is the kind):
 - ``["w", t, session_id, epoch, seq, prompt_len, num_computed, num_input_tokens,
   window_replaced]``: Stage-0 built the prompt for append ``(epoch, seq)``
   (chunked prefill repeats it per chunk).
+- ``["ev", t, session_id, epoch, seq, path, kv, units]``: Stage-0 dropped
+  window units while handling append ``(epoch, seq)``. ``path`` is ``compact``
+  (KV re-anchor; ``kv`` is ``{delta, sink_end, moved_from, prefix_tokens}``,
+  the freed KV range and the worker's window start) or ``replace`` (validated
+  prompt rebuild; ``kv`` is ``None``). Each ``units`` row is ``[unit_seq,
+  unit_tokens, dropped_tokens, dropped_audio_tokens, dropped_image_tokens]``:
+  ``unit_seq`` is the append whose input opened the unit, ``unit_tokens`` its
+  length before this drop. Reading rules: a compaction can cut a unit
+  part-way, so sum rows per ``unit_seq`` across records; a unit is out of the
+  window once none of its audio/image tokens remain, not once every token is
+  gone (a few may stay in the sink or the kept tail). An append that closes no
+  model unit (buffering) never appears here; its audio rides in the next
+  append's unit. A ``trace_dropped`` record means ``ev`` records may be missing.
 - ``["fwd", t_start, session_id, src_stage_id, request_id, t_end]``: the
   orchestrator forwarded a stage output to the next stage (input processing,
   e.g. ``llm2tts``, plus the submit), inline on its loop.
