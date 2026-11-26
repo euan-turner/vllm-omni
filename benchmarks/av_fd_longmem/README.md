@@ -37,7 +37,9 @@ Not yet implemented:
 - proactive probes
 
 The pilot scores answers by matching key tokens, a stand-in for the LLM judge
-(see [Scoring](#scoring)).
+(see [Scoring](#scoring)). From M4 the uncalibrated LLM match is the primary
+verdict; the decisions taken after M3 are in
+[Decisions for M4 onwards](#decisions-for-m4-onwards-2026-11-26).
 
 ## Requirements
 
@@ -423,7 +425,7 @@ CUDA_VISIBLE_DEVICES=1 vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
      answer ("The GitHub page shows a skill with 1.3k stars.").
    - **No LLM blind pre-check.** M3 had the LLM answer each query with no
      media. It was removed on 2026-11-26, because the model's own blind
-     control decides.
+     control decides (see [decision 3](#3-the-models-blind-control-decides-on-guessable-answers)).
 3. **Items** (TTS server, plus the VLM for the backdrop check):
 
    ```bash
@@ -557,6 +559,138 @@ blind control's span plays filler, so its residency is reported as `n/a`.
 - The leakage loop made 56 clip checks and found 1 hit (a card shown in
   live-commerce filler, for the 生日贺卡 item). It was excluded and re-planned.
 
+## Decisions for M4 onwards (2026-11-26)
+
+Taken by Euan after the M3 smoke. Each one gives the data it rests on.
+
+### 1. The retention grid is per source
+
+| Source | Grid (chunks) | In-window point |
+| --- | --- | --- |
+| OmniInteract | {0, 60, 120, 300, 900, 3600} | G=60 |
+| StreamArena | {0, 30, 120, 300, 900, 3600} | G=30 |
+
+**Why.**
+
+- A single-probe session is a 30-chunk filler prefix, then E evidence chunks,
+  then G filler chunks, then the query. The query starts at chunk 30 + E + G.
+- The first compaction comes at about chunk 100 and drops roughly chunks 0–37
+  (M1). It is triggered by token count, so the model's own speech brings it
+  earlier: the pilot saw a minimum span of 60 chunks.
+- OmniInteract evidence is E = 4. At G=60 the query starts at chunk 94: in the
+  window, with a 6-chunk margin. The 0108 single-probe check confirmed it.
+- StreamArena evidence is typically 15–16 chunks after subtitle extension (6–21
+  in the fetched items). At G=60 the query starts at about chunk 106, after the
+  compaction, so the evidence is partly evicted. Since G=120 is clearly out,
+  StreamArena would have no clean in-window point other than G=0.
+
+**Rejected alternatives.**
+
+- G=30 for both: OmniInteract loses the near-boundary point chosen on
+  2026-11-25.
+- Shrinking the filler prefix to about 10 chunks so both sources keep G=60:
+  it changes the session layout that the pilot and the M1 measurements were
+  built on, and the 0108 margin check would need redoing.
+- Dropping subtitle extension: the query lands right on the boundary, and the
+  audio context the extension exists for is lost.
+- A per-item G = 69 − E: lags then vary between items (about 50–63), which
+  blurs any curve over G.
+
+**Cost.** None in stream time. Pooled curves need per-source lags, so results
+are reported per source. The M3 code still builds only the smoke lags
+(`RETENTION_LAGS` in [`build.py`](build.py)); the full grid comes in with the
+M6 plan building.
+
+### 2. English is oversampled and `zh+en` is its own stratum
+
+- **Strata:** StreamArena items are stratified by video language: `zh`, `en`
+  and `zh+en`. All `zh+en` and `en` queries stay in English. The `zh+en`
+  audio is mostly Chinese, so an English query over it is a cross-language
+  probe, which is a different condition from English. This revises the
+  2026-11-25 ruling that `zh+en` counts as English.
+- **Oversampling:** M4 takes more English candidates than the proportional
+  share, so the English yield is measured, not guessed.
+- **M4 candidate quotas** (about 105 candidates for the 50 valid probes):
+
+  | Source | Stratum | Candidates |
+  | --- | --- | --- |
+  | OmniInteract | `zh` | 40 |
+  | StreamArena | `zh` | 20 |
+  | StreamArena | `en` | every grounded candidate (about 20–25 expected) |
+  | StreamArena | `zh+en` | 20 |
+
+  The pure `en` pool is too small for a fixed 30: 38 single-window survivors
+  in 16 videos, 24 of them tutorials. All 16 English videos are fetched. About
+  40 OmniInteract candidates keep the plan's source mix (about 20 valid
+  OmniInteract probes); OmniInteract grounded 9 of 20 in M3, so about 90 are
+  annotated.
+
+  ```bash
+  python -m benchmarks.av_fd_longmem set-annotate --source omniinteract --omniinteract-root "$OI" --n 90 --set m4
+  python -m benchmarks.av_fd_longmem set-items --source omniinteract --omniinteract-root "$OI" --n 40 --set m4
+  python -m benchmarks.av_fd_longmem set-items --source streamarena --per-stratum zh=20 en=38 zh+en=20 --set m4
+  ```
+
+  `en=38` is the whole pure `en` pool, so every grounded `en` candidate is taken.
+
+**Why.** Both English M3 probes failed at G=0, in every plan of each item. The
+model understood the questions and answered in fluent English, so it was the
+evidence that wasn't perceived. With two items, model weakness on English
+cannot be told apart from item difficulty. The English pool is small:
+
+| Stratum | Survivors | Notes |
+| --- | --- | --- |
+| `zh` | 609 | |
+| `en` | 39 | 25 are programming tutorials; their screen text is illegible at 640 px (M0) |
+| `zh+en` | 83 | launch events 37, film 18, first-person 17, sports 11 |
+
+`set-items --per-stratum` takes the quotas, and `stratum` is recorded on every
+candidate, in each item's provenance and on each filler clip. Filler and query
+backdrops are matched to an item by stratum and a different `L1`.
+
+### 3. The model's blind control decides on guessable answers
+
+There is no pre-filter on colour or count questions. Excluded items are
+reported, along with the blind-correct rate per answer type. The LLM blind
+pre-check has been removed from the pipeline.
+
+**Why.**
+
+- Of the 298 eligible OmniInteract items, 21% ask for a colour and 15% for a
+  count. Pre-filtering them would remove valid items (0055 was not guessed
+  blind) and skew the mix toward text and price reading, the hardest visual
+  items.
+- The type predicts guessability only loosely: 2 of the 3 M3 colour or count
+  items were answered blind.
+- The LLM pre-check flagged neither of the two. It guessed three e-bikes and
+  red. MiniCPM-o's blind control isn't text-only: it sees filler video, which
+  can prime a plausible guess.
+- Screening costs about 2 × 75 chunks per candidate. Losing about 12% of
+  OmniInteract candidates to blind failures is about 20–30 minutes of wall time
+  on 2 GPUs per ~100 candidates, small against the ~39 h first pass.
+
+### 4. LLM match is the primary verdict for M4; the calibrated judge comes before M6
+
+- **M4 and experiments:** the LLM verdict is primary and the key-token verdict
+  is secondary. Disagreements are listed in `summary.md` and calibrated by
+  hand, by listening.
+- **Benchmark runs (M6):** the M5 judge (N=3, abstained/hallucinated split,
+  κ against human labels) is built and calibrated first.
+
+**Why.** In M3 (60 probes × 2 channels) the scorers disagreed on 10 probes:
+
+- 9 were key-token wrong and LLM right, all on the 0038 and 0055 colour
+  answers. The key-token scorer needs the exact reference string, and the 0038
+  reference is a whole sentence.
+- 1 was arguably an LLM miss: the 0036 blind ASR "没有基德是两辆电动车", where
+  the LLM probably read "没有" as a negation.
+
+M4 verdicts only decide validity at G=0, and disagreements are few enough to
+check by ear. The retention curves of M6 are the claims that need a calibrated
+judge. The LLM verdict is one call on a 4-bit model, and the same
+`answer_match` prompt also grounds items, so selection and scoring errors can
+correlate.
+
 ## Output layout
 
 ```text
@@ -602,7 +736,7 @@ Text counts toward a probe if it starts inside the window that runs from the que
 
 Every verdict carries the reply text so it can be reviewed by hand. Key-token matching is the primary verdict **only for the pilot**:
 
-- **M4 and experiments:** the LLM match is primary and key-token is secondary.
+- **M4 and experiments:** the LLM match is primary and key-token is secondary (see [Decisions for M4 onwards](#decisions-for-m4-onwards-2026-11-26)).
 - **M6 benchmark runs:** the calibrated M5 judge gives the score. Key-token stays only as an extra column that flags disagreements with the judge; it is too fragile to be the benchmark's score (2026-11-26).
 
 ## Pilot results
