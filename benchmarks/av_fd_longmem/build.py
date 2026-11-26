@@ -6,7 +6,7 @@ Stages, each resumable (LLM/VLM calls are cached, clips are cut deterministicall
 
 1. ``*_candidates``: query rewrite (OmniInteract: LLM; StreamArena: recency words
    replaced by ``sources.streamarena.lag_neutral``), LLM tags, evidence clip, ASR of the
-   evidence audio, grounding and the blind pre-check, one record per candidate in
+   evidence audio and grounding, one record per candidate in
    ``<source>/sets/<set>/candidates.jsonl`` (excluded candidates keep their reason).
    *Grounded* = the VLM answers the question correctly from the evidence frames
    without seeing the answer, or the LLM finds the answer stated in the evidence
@@ -157,16 +157,9 @@ def _ground(
     return grounding, [read.provenance, read_match.provenance, given.provenance, heard.provenance]
 
 
-def _blind(models: Models, query: str, answer: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    guess = an.blind_answer(models.llm, query)
-    match = an.answers_match(models.llm, query, answer, str(guess.output["answer"]))
-    return {"answer": guess.output["answer"], "match": match.output["match"]}, [guess.provenance, match.provenance]
-
-
 def _finish(record: dict[str, Any], models: Models, clip: Path, chunks: int, provenance: list) -> dict[str, Any]:
     grounding, ground_prov = _ground(models, record["lang"], clip, chunks, record["query"], record["answer"])
-    blind, blind_prov = _blind(models, record["query"], record["answer"])
-    record |= {"grounding": grounding, "blind_precheck": blind, "llm_provenance": provenance + ground_prov + blind_prov}
+    record |= {"grounding": grounding, "llm_provenance": provenance + ground_prov}
     if record["status"] == "candidate" and not grounding["grounded"]:
         record |= {"status": "excluded", "reason": "not_grounded"}
     return record
@@ -277,19 +270,14 @@ def streamarena_candidates(paths: SetPaths, models: Models) -> list[dict[str, An
 def pick(candidates: Sequence[dict[str, Any]], *, n: int, per_lang: dict[str, int] | None = None) -> list[dict]:
     """``n`` grounded candidates in candidate order; with ``per_lang``, that many per language, modalities spread.
 
-    Candidates the text-only LLM answered blind come last (not excluded: that is
-    decided by the model's own blind control). With ``per_lang``, an unseen
-    modality outranks that ordering.
+    Guessable answers are left to the model's own blind control (decision 2026-11-26).
     """
     grounded = [c for c in candidates if c["status"] == "candidate"]
-    grounded.sort(key=lambda c: bool(c["blind_precheck"]["match"]))
     if per_lang is None:
         return grounded[:n]
     picked = []
     for lang, count in per_lang.items():
-        pool = sorted(
-            (c for c in grounded if c["lang"] == lang), key=lambda c: (bool(c["blind_precheck"]["match"]), c["item_id"])
-        )
+        pool = sorted((c for c in grounded if c["lang"] == lang), key=lambda c: c["item_id"])
         chosen: list[dict] = []
         while len(chosen) < count and pool:
             seen = {c["modality_declared"] for c in chosen}
@@ -488,7 +476,6 @@ def build_items(
                     "revision": candidate.get("revision"),
                     "answer_original": candidate["answer_original"],
                     "grounding": {k: candidate["grounding"][k] for k in ("visual", "audio_stated")},
-                    "blind_precheck": candidate["blind_precheck"],
                     "backdrop": key if paths.source == "streamarena" else str(backdrop.relative_to(data_root)),
                     "backdrop_start_s": start_s,
                     "tts": {

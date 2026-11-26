@@ -27,7 +27,7 @@ Implemented:
 - the **M0 data audit** of OmniInteract and StreamArena (see [M0](#m0-data-audit));
 - the **M1 window characterisation** (see [M1](#m1-window-characterisation));
 - the **M3 item-set pipeline and smoke** (see [M3](#m3-smoke-item-sets-with-llm-rewrite-and-vlm-grounding)):
-  LLM rewrite and tags, VLM grounding, blind pre-check, leakage checks, and the
+  LLM rewrite and tags, VLM grounding, leakage checks, and the
   control, ablation and retention plans.
 
 Not yet implemented:
@@ -325,7 +325,7 @@ across every set: `score` refuses duplicates.
 
 | Role | Model | Revision |
 | --- | --- | --- |
-| LLM: OmniInteract rewrite, tags, blind pre-check, answer match | `cpatonn/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit` (community 4-bit, 17 GB) | `8d3f99ed` |
+| LLM: OmniInteract rewrite, tags, answer match | `cpatonn/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit` (community 4-bit, 17 GB) | `8d3f99ed` |
 | VLM: grounding, backdrop and filler leakage | `Qwen/Qwen2.5-VL-7B-Instruct` bf16 | `cc594898` |
 | ASR: evidence grounding, leakage scan, TTS check, answer channel | Paraformer-zh; `openai/whisper-large-v3` for en | |
 
@@ -382,8 +382,8 @@ CUDA_VISIBLE_DEVICES=1 vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
      said "no" for all 16 SA candidates, and for 5 of the 9 OI candidates that
      it read correctly unprompted. Several of its own observations stated the
      answer ("The GitHub page shows a skill with 1.3k stars.").
-   - **Blind pre-check:** the LLM answers the query with no media. A match is
-     only a flag. Such items sort last when picking, and the model's own blind
+   - **No LLM blind pre-check.** M3 had the LLM answer each query with no
+     media. It was removed on 2026-11-26, because the model's own blind
      control decides.
 3. **Items** (TTS server, plus the VLM for the backdrop check):
 

@@ -213,41 +213,35 @@ def test_cached_chat_rejects_a_reply_cut_at_max_tokens(tmp_path: Path, monkeypat
     assert not list(tmp_path.iterdir())
 
 
-def _candidate(item_id: str, lang: str, modality: str, *, status: str = "candidate", blind: bool = False) -> dict:
-    return {
-        "item_id": item_id,
-        "lang": lang,
-        "modality_declared": modality,
-        "status": status,
-        "blind_precheck": {"match": blind},
-    }
+def _candidate(item_id: str, lang: str, modality: str, *, status: str = "candidate") -> dict:
+    return {"item_id": item_id, "lang": lang, "modality_declared": modality, "status": status}
 
 
-def test_pick_skips_excluded_and_puts_blind_answerable_candidates_last() -> None:
+def test_pick_skips_excluded_candidates_and_keeps_candidate_order() -> None:
     candidates = [
-        _candidate("a", "zh", "visual", blind=True),
+        _candidate("a", "zh", "visual"),
         _candidate("b", "zh", "visual", status="excluded"),
         _candidate("c", "zh", "visual"),
         _candidate("d", "zh", "visual"),
     ]
 
-    assert [c["item_id"] for c in pick(candidates, n=3)] == ["c", "d", "a"]
+    assert [c["item_id"] for c in pick(candidates, n=3)] == ["a", "c", "d"]
 
 
-def test_pick_per_language_spreads_modalities_before_blind_ordering() -> None:
+def test_pick_per_language_spreads_modalities() -> None:
     candidates = [
         _candidate("e1", "en", "audio"),
         _candidate("e2", "en", "audio"),
         _candidate("e3", "en", "visual"),
         _candidate("z1", "zh", "av"),
         _candidate("z2", "zh", "av"),
-        _candidate("z3", "zh", "audio", blind=True),
+        _candidate("z3", "zh", "audio"),
         _candidate("z4", "zh", "visual"),
     ]
 
     picked = [c["item_id"] for c in pick(candidates, n=5, per_lang={"en": 2, "zh": 3})]
 
-    assert picked == ["e1", "e3", "z1", "z4", "z3"]
+    assert picked == ["e1", "e3", "z1", "z3", "z4"]
 
 
 def test_streamarena_pool_is_same_language_other_domain_and_honours_exclusions() -> None:

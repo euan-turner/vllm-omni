@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
-"""LLM and VLM annotation of candidate items: query rewrite, tags, blind pre-check, grounding and leakage.
+"""LLM and VLM annotation of candidate items: query rewrite, tags, grounding and leakage.
 
 Each function sends one versioned prompt through ``llm.CachedChat`` and
 returns the parsed reply with its provenance. The text-only LLM rewrites and
-tags questions, answers them blind, compares answers and reads evidence
+tags questions, compares answers and reads evidence
 transcripts. The VLM looks at a clip's frames exactly as the stream delivers
 them (1 fps, the rendered JPEGs) and says whether the answer can be seen.
 
@@ -84,17 +84,6 @@ ANNOTATE_STREAMARENA = Prompt(
         "'av' (both)."
     ),
     schema=_object({"relative_time": _BOOL, "non_standalone": _BOOL, "present_referent": _BOOL, "modality": _MODALITY}),
-)
-
-BLIND_ANSWER = Prompt(
-    prompt_id="blind_answer",
-    version=2,
-    system=(
-        "Answer the question as briefly as possible from general knowledge. You have not seen the video it refers "
-        "to. Give your single best guess even if unsure; answer in the question's language."
-    ),
-    schema=_object({"answer": _text(200)}),
-    max_tokens=128,
 )
 
 ANSWER_MATCH = Prompt(
@@ -181,10 +170,6 @@ def rewrite_omniinteract(llm: CachedChat, question: str, answer: str) -> Annotat
 def annotate_streamarena(llm: CachedChat, question: str, answer: str, hints: Sequence[str]) -> Annotation:
     hint = " / ".join(hints) or "(none)"
     return _annotation(llm, ANNOTATE_STREAMARENA, f"Question: {question}\nAnswer: {answer}\nEvidence hint: {hint}")
-
-
-def blind_answer(llm: CachedChat, query: str) -> Annotation:
-    return _annotation(llm, BLIND_ANSWER, query)
 
 
 def answers_match(llm: CachedChat, question: str, reference: str, candidate: str) -> Annotation:
