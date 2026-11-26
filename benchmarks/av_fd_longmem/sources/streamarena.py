@@ -28,7 +28,9 @@ from pathlib import Path
 REVISION = "2960c360deba57b717a17ab66a3ae80f5358a6a3"
 EVIDENCE_HALF_WIDTH_S = 5.0
 EVIDENCE_MAX_HALF_WIDTH_S = 15.0
-#: Video language -> query language. ``zh+en`` videos are English items (decision 2026-11-25).
+#: Video language -> query language. ``zh+en`` videos are English-query items (decision 2026-11-25), but they
+#: form their own stratum (decision 2026-11-26): their audio is mostly Chinese, so an English query over them is
+#: a cross-language probe, not an English one.
 ITEM_LANGS = {"zh": "zh", "en": "en", "zh+en": "en"}
 
 _SO_FAR = re.compile(
@@ -70,6 +72,11 @@ class RecallRow:
     def item_lang(self) -> str | None:
         """Language the query is spoken in; ``None`` when the video's language is not zh or en alone."""
         return ITEM_LANGS.get(self.lang)
+
+    @property
+    def stratum(self) -> str | None:
+        """Reporting and sampling stratum: the video language (``zh``, ``en`` or ``zh+en``) of a usable item."""
+        return self.lang if self.item_lang is not None else None
 
     @property
     def question(self) -> str:

@@ -388,22 +388,27 @@ CUDA_VISIBLE_DEVICES=1 vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
 3. **Items** (TTS server, plus the VLM for the backdrop check):
 
    ```bash
-   python -m benchmarks.av_fd_longmem set-items --source streamarena --per-lang en=2 zh=3 --asr-device cuda:0
+   python -m benchmarks.av_fd_longmem set-items --source streamarena --per-stratum en=2 zh=3 --asr-device cuda:0
    python -m benchmarks.av_fd_longmem set-items --source omniinteract --omniinteract-root "$OI" --n 5 --asr-device cuda:0
    ```
 
-   - **Picking.** Grounded candidates are taken in order, with modalities
-     spread within each language.
+   - **Picking.** Grounded candidates are taken in order. For StreamArena the
+     quotas are per stratum (`zh`, `en`, `zh+en`; the video language), with
+     modalities spread within each stratum. The M3 English items are both from
+     pure `en` videos. Sets built before 2026-11-26 have no `stratum` field
+     on candidates, items or filler: rerun `set-annotate`, `set-items` and
+     `set-plans` (LLM, VLM and TTS calls are cached).
    - **Query clips.** The spoken query goes over a backdrop with a silent 30 s
      tail, and the cut query clip is checked for leakage:
      - OmniInteract backdrops are `1qna` cooking clips.
      - StreamArena backdrops are filler from a different-domain video in the
-       item's language, then removed from the whole set's filler pool.
+       item's stratum, then removed from the whole set's filler pool.
    - **Filler.**
      - OmniInteract: a shuffled 4,000-chunk pool of 1q1a runs that excludes
        every clip that is the source of an item in the set.
      - StreamArena: every filler clip of the fetched videos, restricted per
-       item to its language and another `L1`.
+       item to its stratum and another `L1`. Matching on stratum, not query
+       language, keeps the mostly Chinese `zh+en` audio out of English items.
 4. **Plans** (VLM):
 
    ```bash

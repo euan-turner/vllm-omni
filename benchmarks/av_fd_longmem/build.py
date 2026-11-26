@@ -14,7 +14,8 @@ Stages, each resumable (LLM/VLM calls are cached, clips are cut deterministicall
    invents quotes). The VLM's answer-given verdict is recorded but not used: on
    the M3 StreamArena candidates it said "no" even where its own observation
    stated the answer.
-2. ``build_items``: picks ``n`` grounded candidates, speaks their queries (TTS),
+2. ``build_items``: picks ``n`` grounded candidates (StreamArena: quotas per stratum ``zh``,
+   ``en``, ``zh+en``), speaks their queries (TTS),
    lays each over a leakage-checked backdrop and writes ``items.jsonl`` and the
    set's ``filler.jsonl``.
 3. ``build_plans``: per item, a G=0 control, its blind control and both modality
@@ -26,8 +27,8 @@ Stages, each resumable (LLM/VLM calls are cached, clips are cut deterministicall
 
 Filler: OmniInteract uses runs of 1q1a clips that are not the source of any
 item in the set (domain unset: the OmniInteract taxonomy is open, plan Q2).
-StreamArena uses filler of the item's language from videos of a different
-``L1``. Backdrops are removed from the filler pool of the whole set.
+StreamArena uses filler of the item's stratum (video language: ``zh``, ``en``
+or ``zh+en``) from videos of a different ``L1``. Backdrops are removed from the filler pool of the whole set.
 
 Design: plan §1a, §1b, §2, §3 and §8 M3 (``~/.claude/plans/we-previously-worked-on-wiggly-octopus-…md``).
 External dependencies: an LLM and a VLM (``llm.CachedChat``), a Qwen3-TTS server (``tts.py``),
@@ -190,6 +191,7 @@ def omniinteract_candidates(
             "item_id": item_id,
             "source": "omniinteract",
             "lang": "zh",
+            "stratum": "zh",
             "domain": None,
             "question_original": question.question_text,
             "answer_original": question.answer_text,
@@ -241,6 +243,7 @@ def streamarena_candidates(paths: SetPaths, models: Models) -> list[dict[str, An
                 "item_id": entry["item_id"],
                 "source": "streamarena",
                 "lang": row.item_lang,
+                "stratum": row.stratum,
                 "domain": row.domain,
                 "question_original": row.question,
                 "answer_original": entry["answer"],
@@ -267,17 +270,17 @@ def streamarena_candidates(paths: SetPaths, models: Models) -> list[dict[str, An
 # --- stage 2: items ------------------------------------------------------------------------------------------
 
 
-def pick(candidates: Sequence[dict[str, Any]], *, n: int, per_lang: dict[str, int] | None = None) -> list[dict]:
-    """``n`` grounded candidates in candidate order; with ``per_lang``, that many per language, modalities spread.
+def pick(candidates: Sequence[dict[str, Any]], *, n: int, per_stratum: dict[str, int] | None = None) -> list[dict]:
+    """``n`` grounded candidates in candidate order; with ``per_stratum``, that many per stratum, modalities spread.
 
     Guessable answers are left to the model's own blind control (decision 2026-11-26).
     """
     grounded = [c for c in candidates if c["status"] == "candidate"]
-    if per_lang is None:
+    if per_stratum is None:
         return grounded[:n]
     picked = []
-    for lang, count in per_lang.items():
-        pool = sorted((c for c in grounded if c["lang"] == lang), key=lambda c: c["item_id"])
+    for stratum, count in per_stratum.items():
+        pool = sorted((c for c in grounded if c["stratum"] == stratum), key=lambda c: c["item_id"])
         chosen: list[dict] = []
         while len(chosen) < count and pool:
             seen = {c["modality_declared"] for c in chosen}
@@ -364,7 +367,7 @@ def omniinteract_filler(paths: SetPaths, data_root: Path, item_clips: set[str], 
 
 
 def streamarena_filler(paths: SetPaths) -> list[FillerClip]:
-    """Every materialised filler clip of the fetched videos, labelled with its video's ``L1`` and language."""
+    """Every materialised filler clip of the fetched videos, labelled with its video's ``L1``, language and stratum."""
     meta = {row["video_id"]: row for row in _read_rows(paths.source_root / "annotations" / "video_meta.jsonl")}
     pool = []
     for report in _streamarena_reports(paths):
@@ -381,6 +384,7 @@ def streamarena_filler(paths: SetPaths) -> list[FillerClip]:
                         "video_id": report["video_id"],
                         "src_t0": int(entry["src_t0"]),
                         "lang": sa.ITEM_LANGS.get(str(video["language"])),
+                        "stratum": str(video["language"]),
                         "revision": sa.REVISION,
                         "encode": materialise.ENCODE_SETTINGS,
                     },
@@ -392,7 +396,8 @@ def streamarena_filler(paths: SetPaths) -> list[FillerClip]:
 def item_pool(item: Item, filler: Sequence[FillerClip], *, exclude: set[str]) -> list[FillerClip]:
     """The filler an item may play, in an order fixed by the item id (so items do not all share one opening clip)."""
     if item.source == "streamarena":
-        eligible = [f for f in filler if f.provenance.get("lang") == item.lang and f.domain != item.domain]
+        stratum = item.provenance["stratum"]
+        eligible = [f for f in filler if f.provenance["stratum"] == stratum and f.domain != item.domain]
     else:
         eligible = list(filler)
     eligible = [f for f in eligible if f.filler_id not in exclude and f.filler_id not in item.filler_exclude]
@@ -435,7 +440,7 @@ def build_items(
             options = [
                 (paths.out_root / f.path, 0, f.filler_id)
                 for f in sorted(filler, key=lambda f: f.filler_id)
-                if f.provenance.get("lang") == candidate["lang"] and f.domain != candidate["domain"]
+                if f.provenance["stratum"] == candidate["stratum"] and f.domain != candidate["domain"]
             ]
         else:
             options = backdrops
@@ -470,6 +475,7 @@ def build_items(
                 domain=candidate["domain"],
                 provenance={
                     "set": paths.set_name,
+                    "stratum": candidate["stratum"],
                     "video": candidate["source_video"],
                     "evidence_source_s": candidate["evidence"]["source_s"],
                     "onset_s": candidate.get("onset_s"),

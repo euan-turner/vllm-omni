@@ -185,10 +185,11 @@ def test_streamarena_rule_exclusions(overrides: dict[str, object], reasons: list
     assert sa.exclusion_reasons(_row(**overrides)) == reasons
 
 
-def test_zh_en_videos_are_english_items_and_recency_wording_needs_a_rewrite() -> None:
+def test_zh_en_videos_are_english_queries_in_their_own_stratum_and_recency_wording_needs_a_rewrite() -> None:
     row = _row(lang="zh+en", question_en="Which book did the host just show?")
 
     assert row.item_lang == "en" and row.question == "Which book did the host just show?"
+    assert row.stratum == "zh+en" and _row(lang="en").stratum == "en" and _row(lang="other").stratum is None
     assert sa.needs_lag_neutral_rewrite(_row(question_zh="刚才出现的书叫什么？"))
     assert not sa.needs_lag_neutral_rewrite(_row())
 

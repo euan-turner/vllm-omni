@@ -22,7 +22,9 @@ from benchmarks.av_fd_longmem.sources.streamarena import lag_neutral
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
-def _item(name: str = "x", *, source: str = "omniinteract", lang: str = "zh", domain: str | None = None) -> Item:
+def _item(
+    name: str = "x", *, source: str = "omniinteract", lang: str = "zh", stratum: str = "zh", domain: str | None = None
+) -> Item:
     return Item(
         item_id=name,
         source=source,
@@ -37,12 +39,14 @@ def _item(name: str = "x", *, source: str = "omniinteract", lang: str = "zh", do
         query_text_original="q",
         answer="a",
         modality_declared="visual",
-        provenance={},
+        provenance={"stratum": stratum},
         domain=domain,
     )
 
 
-def _filler(n: int = 20, *, chunks: int = 97, domain: str | None = None, lang: str = "zh") -> list[FillerClip]:
+def _filler(
+    n: int = 20, *, chunks: int = 97, domain: str | None = None, lang: str = "zh", stratum: str = "zh"
+) -> list[FillerClip]:
     return [
         FillerClip(
             filler_id=f"{domain}-f{i}",
@@ -50,7 +54,7 @@ def _filler(n: int = 20, *, chunks: int = 97, domain: str | None = None, lang: s
             chunks=chunks,
             source="test",
             domain=domain,
-            provenance={"lang": lang},
+            provenance={"lang": lang, "stratum": stratum},
         )
         for i in range(n)
     ]
@@ -213,8 +217,8 @@ def test_cached_chat_rejects_a_reply_cut_at_max_tokens(tmp_path: Path, monkeypat
     assert not list(tmp_path.iterdir())
 
 
-def _candidate(item_id: str, lang: str, modality: str, *, status: str = "candidate") -> dict:
-    return {"item_id": item_id, "lang": lang, "modality_declared": modality, "status": status}
+def _candidate(item_id: str, stratum: str, modality: str, *, status: str = "candidate") -> dict:
+    return {"item_id": item_id, "stratum": stratum, "modality_declared": modality, "status": status}
 
 
 def test_pick_skips_excluded_candidates_and_keeps_candidate_order() -> None:
@@ -228,30 +232,39 @@ def test_pick_skips_excluded_candidates_and_keeps_candidate_order() -> None:
     assert [c["item_id"] for c in pick(candidates, n=3)] == ["a", "c", "d"]
 
 
-def test_pick_per_language_spreads_modalities() -> None:
+def test_pick_per_stratum_keeps_mixed_language_videos_apart_and_spreads_modalities() -> None:
     candidates = [
         _candidate("e1", "en", "audio"),
         _candidate("e2", "en", "audio"),
         _candidate("e3", "en", "visual"),
+        _candidate("m1", "zh+en", "visual"),
+        _candidate("m2", "zh+en", "audio"),
         _candidate("z1", "zh", "av"),
         _candidate("z2", "zh", "av"),
         _candidate("z3", "zh", "audio"),
         _candidate("z4", "zh", "visual"),
     ]
 
-    picked = [c["item_id"] for c in pick(candidates, n=5, per_lang={"en": 2, "zh": 3})]
+    picked = [c["item_id"] for c in pick(candidates, n=7, per_stratum={"en": 2, "zh+en": 1, "zh": 3})]
 
-    assert picked == ["e1", "e3", "z1", "z3", "z4"]
+    assert picked == ["e1", "e3", "m1", "z1", "z3", "z4"]
 
 
-def test_streamarena_pool_is_same_language_other_domain_and_honours_exclusions() -> None:
-    filler = _filler(4, domain="anime") + _filler(4, domain="shop") + _filler(4, domain="talk", lang="en")
+def test_streamarena_pool_is_same_stratum_other_domain_and_honours_exclusions() -> None:
+    filler = _filler(4, domain="anime") + _filler(4, domain="shop") + _filler(4, domain="talk", lang="en", stratum="en")
     item = _item(source="streamarena", lang="zh", domain="anime")
     item = Item(**{**item.__dict__, "filler_exclude": ["shop-f1"]})
 
     pool = item_pool(item, filler, exclude={"shop-f2"})
 
     assert sorted(f.filler_id for f in pool) == ["shop-f0", "shop-f3"]
+
+
+def test_english_items_never_get_filler_from_mixed_language_videos() -> None:
+    filler = _filler(4, domain="film", lang="en", stratum="zh+en") + _filler(4, domain="talk", lang="en", stratum="en")
+    item = _item(source="streamarena", lang="en", stratum="en", domain="tutorial")
+
+    assert sorted(f.filler_id for f in item_pool(item, filler, exclude=set())) == [f"talk-f{i}" for i in range(4)]
 
 
 def test_item_pool_order_depends_on_the_item_only() -> None:

@@ -266,8 +266,8 @@ def _set_items(args: argparse.Namespace) -> int:
 
     paths, models = _set_models(args)
     candidates = [json.loads(line) for line in (paths.set_root / "candidates.jsonl").read_text().splitlines()]
-    per_lang = {lang: int(count) for lang, count in (pair.split("=") for pair in args.per_lang)} or None
-    chosen = pick(candidates, n=args.n, per_lang=per_lang)
+    per_stratum = {name: int(count) for name, count in (pair.split("=") for pair in args.per_stratum)} or None
+    chosen = pick(candidates, n=args.n, per_stratum=per_stratum)
     items, filler = build_items(
         paths, chosen, models, data_root=args.omniinteract_root, tts_url=args.tts_url,
         transcribe_file=models.transcribe.transcribe_file,
@@ -384,7 +384,9 @@ def main(argv: list[str] | None = None) -> int:
     annotate.add_argument("--n", type=int, default=20, help="OmniInteract candidates to sample.")
     items = set_stage("set-items", "Pick items, speak queries, cut query clips.", _set_items)
     items.add_argument("--n", type=int, default=5)
-    items.add_argument("--per-lang", nargs="*", default=[], help="lang=count, e.g. en=2 zh=3 (StreamArena).")
+    items.add_argument(
+        "--per-stratum", nargs="*", default=[], help="stratum=count, e.g. zh=3 en=2 zh+en=2 (StreamArena)."
+    )
     items.add_argument("--tts-url", default="http://127.0.0.1:8091")
     set_stage("set-plans", "Write leakage-checked plans for an item set.", _set_plans)
 
